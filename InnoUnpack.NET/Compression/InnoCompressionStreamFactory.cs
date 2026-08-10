@@ -1,6 +1,5 @@
 using System.IO.Compression;
 using InnoUnpack.NET.Metadata;
-using SharpCompress.Compressors.BZip2;
 
 namespace InnoUnpack.NET.Compression;
 
@@ -33,7 +32,7 @@ static class InnoCompressionStreamFactory {
 				return new ZLibStream(input, CompressionMode.Decompress, false);
 
 			case InnoCompressionMethod.BZip2:
-				return BZip2Stream.Create(input, SharpCompress.Compressors.CompressionMode.Decompress, false);
+				return new BZip2Stream(input);
 
 			case InnoCompressionMethod.Lzma1: {
 				// 属性头在 Lzma1Stream 内部解析（5 字节）

@@ -11,7 +11,7 @@ static class InnoVersionParser {
 	/// <summary>签名串最大长度（64 字节）。</summary>
 	public const int SignatureSize = 64;
 
-	static private readonly string[] _knownSignatures = [
+	static private readonly string[] KnownSignatures = [
 		// 4.x（ANSI）
 		"Inno Setup Setup Data (4.0.0a)",
 		"Inno Setup Setup Data (4.0.1)",
@@ -98,7 +98,7 @@ static class InnoVersionParser {
 	];
 
 	/// <summary>各已知签名对应的版本元数据。</summary>
-	static private readonly (uint A, uint B, uint C, uint D, bool Unicode, bool Isx, bool Ambiguous)[] _knownVersions = [
+	static private readonly (uint A, uint B, uint C, uint D, bool Unicode, bool Isx, bool Ambiguous)[] KnownVersions = [
 		(4, 0, 0, 0, false, false, false), (4, 0, 1, 0, false, false, false), (4, 0, 3, 0, false, false, false),
 		(4, 0, 5, 0, false, false, false), (4, 0, 9, 0, false, false, false), (4, 0, 10, 0, false, false, false),
 		(4, 0, 11, 0, false, false, false), (4, 1, 0, 0, false, false, false), (4, 1, 2, 0, false, false, false),
@@ -164,9 +164,9 @@ static class InnoVersionParser {
 			throw new InnoFormatException("不是 Inno Setup 安装包（缺少签名）");
 		}
 
-		for (var i = 0; i < _knownSignatures.Length; i++) {
-			if (text == _knownSignatures[i]) {
-				var (a, b, c, d, unicode, isx, _) = _knownVersions[i];
+		for (var i = 0; i < KnownSignatures.Length; i++) {
+			if (text == KnownSignatures[i]) {
+				var (a, b, c, d, unicode, isx, _) = KnownVersions[i];
 				return new(a, b, c, d, unicode, isx, false, true);
 			}
 		}
@@ -249,8 +249,8 @@ static class InnoVersionParser {
 	///     返回版本表中下一个已知版本（用于渐进解析歧义版本）。
 	/// </summary>
 	public static InnoVersion? Next(InnoVersion version) {
-		for (var i = 0; i < _knownVersions.Length; i++) {
-			var (a, b, c, d, unicode, _, _) = _knownVersions[i];
+		for (var i = 0; i < KnownVersions.Length; i++) {
+			var (a, b, c, d, unicode, _, _) = KnownVersions[i];
 			if (CompareNumeric(a, b, c, d, version.Major, version.Minor, version.Patch, version.Revision) > 0
 				&& unicode == version.IsUnicode) {
 				return new InnoVersion(a, b, c, d, unicode, false, false, true);

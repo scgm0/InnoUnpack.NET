@@ -14,7 +14,7 @@ static class InnoStringDecoder {
 	/// <summary>Windows-1252 的代码页号。</summary>
 	public const int CpWindows1252 = 1252;
 
-	static private readonly Encoding _utf16Le =
+	static private readonly Encoding Utf16Le =
 		new UnicodeEncoding(false, false, false);
 
 	static private bool _codePagesRegistered;
@@ -29,7 +29,7 @@ static class InnoStringDecoder {
 	/// <summary>获取指定 Windows 代码页对应的编码。</summary>
 	public static Encoding GetEncoding(int codepage) {
 		if (codepage == CpUtf16Le) {
-			return _utf16Le;
+			return Utf16Le;
 		}
 
 		EnsureCodePages();
@@ -85,7 +85,7 @@ static class InnoStringDecoder {
 
 	static private string ConvertSegment(ReadOnlySpan<byte> data, int codepage) {
 		return codepage == CpUtf16Le
-			? _utf16Le.GetString(data)
+			? Utf16Le.GetString(data)
 			: GetEncoding(codepage).GetString(data);
 	}
 }

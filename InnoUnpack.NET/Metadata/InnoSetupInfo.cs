@@ -165,7 +165,7 @@ public sealed class InnoSetupInfo {
 		InnoBinaryReader reader = new(stream);
 
 		// 6.5.0+：读取独立加密头
-		if (version >= new InnoVersion(6, 5, 0, 0, version.IsUnicode, version.IsIsx, false, true)) {
+		if (version >= InnoVersion.From(6, 5, 0, version)) {
 			info.EncryptionHeader = ReadEncryptionHeader(reader);
 		}
 
@@ -325,7 +325,7 @@ public sealed class InnoSetupInfo {
 
 	static private void SkipWizardImageGroup(InnoBinaryReader reader, InnoVersion version) {
 		var count = 1;
-		if (version >= new InnoVersion(5, 6, 0, 0, version.IsUnicode, version.IsIsx, false, true)) {
+		if (version >= InnoVersion.From(5, 6, 0, version)) {
 			var wc = reader.ReadBytes(4);
 			count = BitConverter.ToInt32(wc, 0);
 		}

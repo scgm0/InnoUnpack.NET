@@ -16,7 +16,7 @@ static class SignatureFinder {
 	private const uint SetupLoaderHeaderOffset = 0x30;
 	private const uint SetupLoaderHeaderMagic = 0x6F6E6E49; // "Inno"
 
-	static private readonly byte[][] _loaderMagics = [
+	static private readonly byte[][] LoaderMagics = [
 		// 与 innoextract known_setup_loader_versions 对应（每项 12 字节）
 		// Latin1 编码：U+0080-U+00FF 映射为单字节（u8 字面量的 \u 转义会编码为两字节，\x 会贪婪吞并后续十六进制字符）
 		Latin1("rDlPtS02\u0087eVx"), // 1.2.10
@@ -170,8 +170,8 @@ static class SignatureFinder {
 	}
 
 	static private int IndexOfMagic(ReadOnlySpan<byte> magic) {
-		for (var i = 0; i < _loaderMagics.Length; i++) {
-			if (magic.SequenceEqual(_loaderMagics[i])) {
+		for (var i = 0; i < LoaderMagics.Length; i++) {
+			if (magic.SequenceEqual(LoaderMagics[i])) {
 				return i;
 			}
 		}

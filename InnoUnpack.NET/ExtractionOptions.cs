@@ -19,8 +19,13 @@ public sealed class ExtractionOptions {
 	/// <summary>是否覆盖已存在的文件（默认 true）。</summary>
 	public bool Overwrite { get; set; } = true;
 
-	/// <summary>进度报告器。</summary>
-	public IProgress<ExtractionProgress>? Progress { get; init; }
+	/// <summary>提取进度事件（绝对进度，同步触发）。</summary>
+	public event Action<ExtractionProgress>? ProgressChanged;
+
+	/// <summary>触发进度事件（提取引擎内部调用）。</summary>
+	internal void RaiseProgressChanged(ulong bytesExtracted, int filesExtracted, string? currentFileName) {
+		ProgressChanged?.Invoke(new(bytesExtracted, filesExtracted, currentFileName));
+	}
 }
 
 /// <summary>

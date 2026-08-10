@@ -51,6 +51,10 @@ public readonly struct InnoVersion : IComparable<InnoVersion>, IEquatable<InnoVe
 		NumericValue = (ulong)major << 48 | (ulong)minor << 32 | (ulong)patch << 16 | revision;
 	}
 
+	/// <summary>基于现有版本的变体标记构造指定版本号（用于版本比较）。</summary>
+	internal static InnoVersion From(uint major, uint minor, uint patch, InnoVersion like)
+		=> new(major, minor, patch, 0, like.IsUnicode, like.IsIsx, like.Is16Bit, isKnown: true);
+
 	/// <summary>转换为纯版本号（忽略变体标记）。</summary>
 	private ulong NumericValue { get; }
 

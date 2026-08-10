@@ -118,11 +118,11 @@ public class ArchiveSmokeTests {
 		Assert.True(totalFiles > 0);
 		Assert.True(totalBytes > 0);
 
-		Progress<ExtractionProgress> progress = new();
+		var options = new ExtractionOptions();
 		var filesExtracted = 0;
 		ulong bytesExtracted = 0;
 		var sawCompletion = false;
-		progress.ProgressChanged += (_, p) => {
+		options.ProgressChanged += p => {
 			filesExtracted = Math.Max(filesExtracted, p.FilesExtracted);
 			bytesExtracted = Math.Max(bytesExtracted, p.BytesExtracted);
 			if (p.CurrentFileName is null) {
@@ -136,7 +136,7 @@ public class ArchiveSmokeTests {
 		}
 
 		try {
-			await archive.ExtractToDirectoryAsync(outputDir, new() { Progress = progress });
+			await archive.ExtractToDirectoryAsync(outputDir, options);
 		} finally {
 			if (Directory.Exists(outputDir)) {
 				Directory.Delete(outputDir, true);

@@ -5,7 +5,7 @@ namespace InnoUnpack.NET.Reading;
 ///     用于校验块头、加密头等数据。
 /// </summary>
 sealed class Crc32 {
-	static private readonly uint[] _table = BuildTable();
+	static private readonly uint[] Table = BuildTable();
 
 	private uint _value = 0xFFFFFFFF;
 
@@ -26,13 +26,13 @@ sealed class Crc32 {
 	public void Update(ReadOnlySpan<byte> data) {
 		var c = _value;
 		foreach (var b in data) {
-			c = _table[(c ^ b) & 0xFF] ^ c >> 8;
+			c = Table[(c ^ b) & 0xFF] ^ c >> 8;
 		}
 
 		_value = c;
 	}
 
-	public void Update(byte b) { _value = _table[(_value ^ b) & 0xFF] ^ _value >> 8; }
+	public void Update(byte b) { _value = Table[(_value ^ b) & 0xFF] ^ _value >> 8; }
 
 	/// <summary>返回最终的 CRC-32 值。</summary>
 	public uint GetValue() { return _value ^ 0xFFFFFFFF; }

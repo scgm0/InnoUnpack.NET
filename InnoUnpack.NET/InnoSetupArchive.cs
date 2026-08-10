@@ -71,17 +71,18 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	}
 
 	private (int Count, ulong Size) GetFileStats() {
-		if (_fileStats is null) {
-			var count = 0;
-			ulong size = 0;
-			foreach (var file in EnumerateFiles()) {
-				count++;
-				size += file.Size;
-			}
-
-			_fileStats = (count, size);
+		if (_fileStats is not null) {
+			return _fileStats.Value;
 		}
 
+		var count = 0;
+		ulong size = 0;
+		foreach (var file in EnumerateFiles()) {
+			count++;
+			size += file.Size;
+		}
+
+		_fileStats = (count, size);
 		return _fileStats.Value;
 	}
 
@@ -129,7 +130,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	public static InnoSetupArchive Open(string path, InnoOpenOptions? options = null) {
 		FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read);
 		try {
-			return Open(stream, options);
+			return OpenCore(stream, options, leaveOpen: false, installerPath: Path.GetFullPath(path));
 		} catch {
 			stream.Dispose();
 			throw;
@@ -140,7 +141,13 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	/// <param name="stream">安装包数据流。</param>
 	/// <param name="options">打开选项。</param>
 	/// <param name="leaveOpen">关闭 archive 时是否保留流不关闭。</param>
-	public static InnoSetupArchive Open(Stream stream, InnoOpenOptions? options = null, bool leaveOpen = false) {
+	/// <exception cref="InnoUnsupportedException">
+	///     多磁盘安装包（数据在外部 setup-N.bin 切片中）必须使用 <see cref="Open(string, InnoOpenOptions)"/> 打开。
+	/// </exception>
+	public static InnoSetupArchive Open(Stream stream, InnoOpenOptions? options = null, bool leaveOpen = false)
+		=> OpenCore(stream, options, leaveOpen, installerPath: null);
+
+	static private InnoSetupArchive OpenCore(Stream stream, InnoOpenOptions? options, bool leaveOpen, string? installerPath) {
 		ArgumentNullException.ThrowIfNull(stream);
 		options ??= new();
 
@@ -152,10 +159,28 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		stream.Position = (long)offsets.HeaderOffset;
 		var info = InnoSetupInfo.Load(stream, options.ForceCodepage);
 
-		// chunk 数据区从头部解析结束处开始（签名搜索路径无 offsets 表时）
-		var dataOffset = offsets.DataOffset != 0 ? (long)offsets.DataOffset : info.DataOffset;
-		InnoFilenameConverter converter = new(options.PathMappings);
-		var slices = SliceReader.CreateEmbedded(stream, (ulong)dataOffset);
+		SliceReader slices;
+		if (offsets.DataOffset != 0) {
+			// 单文件安装包：数据内嵌于 exe 中
+			slices = SliceReader.CreateEmbedded(stream, offsets.DataOffset);
+		} else {
+			// 多磁盘安装包：数据位于外部 setup-N.bin 切片中
+			if (installerPath is null) {
+				throw new InnoUnsupportedException("多磁盘安装包（数据在外部 setup-N.bin 切片中）需要从文件路径打开");
+			}
+			var dir = Path.GetDirectoryName(installerPath)
+				?? throw new InnoFormatException($"无法解析安装包路径：{installerPath}");
+			var basename = Path.GetFileNameWithoutExtension(installerPath);
+			var basename2 = info.Header.BaseFilename;
+			// 4.1.7 之前优先使用头部记录的基础文件名（与 innoextract 一致）
+			if (info.Version < new InnoVersion(4, 1, 7, 0, info.Version.IsUnicode, info.Version.IsIsx, false, true)
+				&& !string.IsNullOrEmpty(basename2)) {
+				(basename, basename2) = (basename2, basename);
+			}
+			slices = SliceReader.CreateExternal(dir, basename, basename2, info.Header.SlicesPerDisk);
+		}
+
+		var converter = new InnoFilenameConverter(options.PathMappings);
 
 		// 校验密码（错误会抛出 InnoFormatException），并建立解密上下文
 		var crypto = InnoCrypto.Create(info, options.Password);
@@ -209,16 +234,22 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 				continue; // 外部文件（不包含数据）
 			}
 
-			if (entry.Type == InnoFileType.UninstallerExe) {
-				continue; // 卸载程序文件
+			var data = Info.DataEntries[entry.Location];
+
+			// 卸载程序（UninstExe）：5.x+ 无包内数据（由安装器生成），4.x 有数据则提取
+			if (entry.Type == InnoFileType.UninstallerExe && data.FileSize == 0) {
+				continue;
 			}
 
-			var data = Info.DataEntries[entry.Location];
-			var sourceName = entry.Source.Length > 0 ? entry.Source : Path.GetFileName(entry.Destination);
+			// UninstExe 无目标路径时使用 Inno Setup 的标准卸载程序名
+			var destination = entry.Destination.Length > 0
+				? entry.Destination
+				: Path.Combine("{app}", "unins000.exe");
+			var sourceName = entry.Source.Length > 0 ? entry.Source : Path.GetFileName(destination);
 			yield return new() {
 				SourceName = sourceName,
-				Destination = entry.Destination,
-				Path = _converter.Convert(entry.Destination),
+				Destination = destination,
+				Path = _converter.Convert(destination),
 				Size = data.FileSize,
 				Timestamp = data.Timestamp,
 				FileVersion = data.FileVersion,
@@ -257,11 +288,11 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 
 	/// <summary>按数据版本选择指令解码模式。</summary>
 	static private ExeFilterStream.Mode FilterModeFor(InnoVersion version) {
-		if (version < new InnoVersion(5, 2, 0, 0, version.IsUnicode, version.IsIsx, false, true)) {
+		if (version < InnoVersion.From(5, 2, 0, version)) {
 			return ExeFilterStream.Mode.Legacy;
 		}
 
-		if (version < new InnoVersion(5, 3, 9, 0, version.IsUnicode, version.IsIsx, false, true)) {
+		if (version < InnoVersion.From(5, 3, 9, version)) {
 			return ExeFilterStream.Mode.Blocked;
 		}
 
@@ -289,8 +320,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		ulong extracted = 0;
 		var filesExtracted = 0;
 		foreach (var file in files) {
-			if (!options.ExtractTemporaryFiles
-				&& (file.Options & InnoFileOptions.DeleteAfterInstall) != 0) {
+			if (ShouldSkipTemporary(file, options)) {
 				filesExtracted++;
 				ReportProgress(options, extracted, filesExtracted, file.Path);
 				continue;
@@ -303,7 +333,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 				continue;
 			}
 
-			Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+			EnsureParentDirectory(target);
 
 			if (File.Exists(target) && !options.Overwrite) {
 				extracted += file.Size;
@@ -340,17 +370,10 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 
 			filesExtracted++;
 			ReportProgress(options, extracted, filesExtracted, file.Path);
-
-			if (options.PreserveTimestamps && file.Timestamp != default) {
-				try {
-					File.SetLastWriteTimeUtc(target, file.Timestamp);
-				} catch (IOException) {
-					// 忽略时间戳设置失败（如权限或文件系统限制）
-				} catch (UnauthorizedAccessException) { }
-			}
+			SetTimestamp(target, file.Timestamp, options);
 		}
 
-		options.Progress?.Report(new(extracted, filesExtracted, null));
+		options.RaiseProgressChanged(extracted, filesExtracted, null);
 	}
 
 	/// <summary>
@@ -380,8 +403,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		foreach (var file in files) {
 			cancellationToken.ThrowIfCancellationRequested();
 
-			if (!options.ExtractTemporaryFiles
-				&& (file.Options & InnoFileOptions.DeleteAfterInstall) != 0) {
+			if (ShouldSkipTemporary(file, options)) {
 				filesExtracted++;
 				ReportProgress(options, extracted, filesExtracted, file.Path);
 				continue;
@@ -394,7 +416,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 				continue;
 			}
 
-			Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+			EnsureParentDirectory(target);
 
 			if (File.Exists(target) && !options.Overwrite) {
 				extracted += file.Size;
@@ -437,21 +459,35 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 
 			filesExtracted++;
 			ReportProgress(options, extracted, filesExtracted, file.Path);
-
-			if (options.PreserveTimestamps && file.Timestamp != default) {
-				try {
-					File.SetLastWriteTimeUtc(target, file.Timestamp);
-				} catch (IOException) {
-					// 忽略时间戳设置失败（如权限或文件系统限制）
-				} catch (UnauthorizedAccessException) { }
-			}
+			SetTimestamp(target, file.Timestamp, options);
 		}
 
-		options.Progress?.Report(new(extracted, filesExtracted, null));
+		options.RaiseProgressChanged(extracted, filesExtracted, null);
+	}
+
+	static private bool ShouldSkipTemporary(InnoArchiveFile file, ExtractionOptions options)
+		=> !options.ExtractTemporaryFiles && (file.Options & InnoFileOptions.DeleteAfterInstall) != 0;
+
+	static private void EnsureParentDirectory(string target) {
+		var dir = Path.GetDirectoryName(target)
+			?? throw new InnoFormatException($"无法解析目标路径：{target}");
+		Directory.CreateDirectory(dir);
+	}
+
+	static private void SetTimestamp(string target, DateTime timestamp, ExtractionOptions options) {
+		if (!options.PreserveTimestamps || timestamp == default) {
+			return;
+		}
+
+		try {
+			File.SetLastWriteTimeUtc(target, timestamp);
+		} catch (IOException) {
+			// 忽略时间戳设置失败（如权限或文件系统限制）
+		} catch (UnauthorizedAccessException) { }
 	}
 
 	static private void ReportProgress(ExtractionOptions options, ulong extracted, int filesExtracted, string? currentFile) {
-		options.Progress?.Report(new(extracted, filesExtracted, currentFile));
+		options.RaiseProgressChanged(extracted, filesExtracted, currentFile);
 	}
 
 	private void CreateDirectories(string outputRoot) {
