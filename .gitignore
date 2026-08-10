@@ -1,0 +1,32 @@
+# ===== .NET =====
+bin/
+obj/
+*.user
+*.suo
+*.userprefs
+.vs/
+.vscode/
+TestResults/
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+*.coveragexml
+coverage*.json
+coverage*.cobertura.xml
+
+# ===== 构建产物 =====
+artifacts/
+
+# ===== IDE =====
+.idea/
+*.sln.iml
+*.swp
+*~
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+
+# ===== 测试样本（tools/download-fixtures.sh 下载，不入库） =====
+InnoUnpack.Tests/Fixtures/
+InnoUnpack.Tests/Fixtures/bin/

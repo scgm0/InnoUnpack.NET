@@ -1,0 +1,4 @@
+<Solution>
+    <Project Path="InnoUnpack.NET/InnoUnpack.NET.csproj"/>
+    <Project Path="InnoUnpack.Tests/InnoUnpack.Tests.csproj"/>
+</Solution>
