@@ -267,6 +267,8 @@ public sealed class InnoFileEntry {
 
 	/// <summary>读取完整的 windows_version_range（每侧：win_version + nt_version + nt_service_pack）。</summary>
 	static private InnoWindowsVersionRange ReadWindowsVersionRange(InnoBinaryReader reader) {
+		return new(ReadOne(), ReadOne());
+
 		InnoWindowsVersion ReadOne() {
 			var build = reader.ReadUInt16();
 			var minor = reader.ReadByte();
@@ -277,8 +279,6 @@ public sealed class InnoFileEntry {
 			_ = reader.ReadUInt16(); // nt_service_pack（major+minor）
 			return new(major, minor, build);
 		}
-
-		return new(ReadOne(), ReadOne());
 	}
 
 	/// <summary>内部：按位读取的标志集（Delphi set 布局：3 字节时补齐为 4 字节）。</summary>

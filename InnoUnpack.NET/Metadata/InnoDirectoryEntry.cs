@@ -87,6 +87,8 @@ public sealed class InnoDirectoryEntry {
 	}
 
 	static private InnoWindowsVersionRange ReadWindowsVersionRange(InnoBinaryReader reader) {
+		return new(ReadOne(), ReadOne());
+
 		InnoWindowsVersion ReadOne() {
 			var build = reader.ReadUInt16();
 			var minor = reader.ReadByte();
@@ -97,7 +99,5 @@ public sealed class InnoDirectoryEntry {
 			_ = reader.ReadUInt16(); // nt_service_pack（major+minor）
 			return new(major, minor, build);
 		}
-
-		return new(ReadOne(), ReadOne());
 	}
 }

@@ -15,6 +15,10 @@
     - ARC4 + SHA1（5.3.9 – 6.3.x）
     - XChaCha20（6.4.0+，含 6.5.0+ 独立加密头）
 - 可执行文件调用指令优化还原（Call Instruction Optimizer，4.1.8+ 默认启用）
+- 目录权限与属性应用（POSIX 权限 / Windows 文件属性，`ApplyDirectoryAttributes`，默认关闭）
+- 逐文件提取过滤与输出路径映射（`FileFilter` / `OutputPathMapper`）
+- 提取取消（同步/异步均支持 `CancellationToken`）
+- **并行提取多个安装包**：各 archive 实例相互独立、无共享可变状态，可直接多线程并行
 - 文件校验和验证（MD5 / SHA1 / SHA256 / CRC32 / Adler32）
 - 异步 API（`OpenAsync` / `ExtractToDirectoryAsync` / `IAsyncDisposable`）
 - 基于 **文件数**与 **字节数**的进度报告（绝对进度，百分比由调用方计算）
@@ -75,6 +79,36 @@ archive.ExtractToDirectory("output", options, cts.Token);        // 同步
 await archive.ExtractToDirectoryAsync("output", options, cts.Token); // 异步
 ```
 
+## 过滤与路径映射
+
+`ExtractionOptions` 支持逐文件决策与输出路径自定义：
+
+```csharp
+var options = new ExtractionOptions {
+    // 只提取 {app} 子树（提取过程中逐文件调用）
+    FileFilter = f => f.Path.StartsWith("app/", StringComparison.Ordinal),
+
+    // 把 {app} 下的文件映射到 "custom/..."（返回 null 使用默认路径；
+    // 不安全路径（绝对/逃逸）自动回退默认，绝不写出输出目录）
+    OutputPathMapper = f => f.Path.StartsWith("app/", StringComparison.Ordinal)
+        ? "custom/" + f.Path[4..]
+        : null,
+};
+
+archive.ExtractToDirectory("output", options);
+```
+
+- 被过滤的文件**不参与进度统计**（不计入已处理文件数、不触发进度事件）
+- `FileFilter` 可基于任意文件属性判断：输出路径（`f.Path`）、安装器原始路径
+  （`f.Destination`，含 `{app}` 常量与 Windows 分隔符）、源文件名（`f.SourceName`）、大小等
+- 过滤后的文件总数可用 `archive.EnumerateFiles(filter).Count()` 计算（进度百分比对齐）
+- 路径映射分两层，各司其职：
+  - `InnoOpenOptions.PathMappings`（打开时）：全局常量替换，作用于**所有**路径（含目录条目），
+    适合"整个包换前缀"（如 `{app}` → `myapp`）
+  - `OutputPathMapper`（提取时）：逐文件条件化映射，作用于已展开路径，
+    适合"个别文件重命名/分流"（如把某个 exe 单独输出到别的目录）；与 `FileFilter` 组合
+    可实现"只提取 app 到指定文件夹"
+
 ## 加密安装包
 
 ```csharp
@@ -113,6 +147,8 @@ archive.ExtractToDirectory("output");
 - 平台：.NET 10（跨平台，Windows / Linux）
 - **依赖：零**（无 NuGet 依赖；`bzip2` 与加密算法自定义实现，`LZMA1`/`LZMA2` 移植自 LZMA SDK，`zlib` 使用 .NET 内置）
 - **NativeAOT 兼容**（无反射，可 `PublishAot=true` 发布为原生二进制）
+- **多线程并行**：不同 archive 实例间无共享可变状态（静态初始化已线程安全），
+  多个安装包可同时提取；同一实例不支持并发访问
 - 已知限制：
     - 5.x+ 安装包的卸载程序（UninstExe）数据由安装器运行时生成，不包含在包内（不提取）
     - 加密安装包的 6.5.0+ 解密支持经过算法级验证，但尚未经真实加密样本端到端验证

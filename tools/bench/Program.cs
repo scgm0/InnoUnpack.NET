@@ -11,7 +11,8 @@ using InnoUnpack.NET.Metadata;
  *   bench fairloop <fixtures-dir> <fixture>   进程内预热后 best-of-7（库热路径）
  *   bench full   <fixtures-dir>               公共 API 全量提取 best-of-3（默认选项）
  *   bench verify <fixtures-dir>               公共 API + SHA256 校验
- *   bench gc     <fixtures-dir>               分配与 GC 统计
+ *   bench gc     <fixtures-dir>               分配与 GC 统计（冷进程）
+ *   bench gcwarm <fixtures-dir>               池预热后的分配与 GC 统计
  */
 
 var fixtures = new[] {

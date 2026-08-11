@@ -17,12 +17,22 @@ static class InnoStringDecoder {
 	static private readonly Encoding Utf16Le =
 		new UnicodeEncoding(false, false, false);
 
-	static private bool _codePagesRegistered;
+	static private volatile bool _codePagesRegistered;
+	static private readonly Lock CodePagesLock = new();
 
+	// volatile 双检锁：字段在锁外读取是安全的（内存栅栏保证先写入后可见）
+	// ReSharper disable once InconsistentlySynchronizedField
 	static private void EnsureCodePages() {
-		if (!_codePagesRegistered) {
-			Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
-			_codePagesRegistered = true;
+		if (_codePagesRegistered) {
+			return;
+		}
+
+		// 并行提取多个安装包时可能并发首次解码：双检锁保证只注册一次
+		lock (CodePagesLock) {
+			if (!_codePagesRegistered) {
+				Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+				_codePagesRegistered = true;
+			}
 		}
 	}
 

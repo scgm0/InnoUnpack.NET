@@ -762,6 +762,8 @@ public sealed class InnoHeader {
 	///     读取完整的 windows_version_range（每侧：win_version + nt_version + nt_service_pack）。
 	/// </summary>
 	static private InnoWindowsVersionRange ReadWindowsVersionRange(InnoBinaryReader reader, bool hasBuild) {
+		return new(ReadOne(), ReadOne());
+
 		InnoWindowsVersion ReadOne() {
 			var build = hasBuild ? reader.ReadUInt16() : (ushort)0;
 			var minor = reader.ReadByte();
@@ -772,8 +774,6 @@ public sealed class InnoHeader {
 			_ = reader.ReadUInt16(); // nt_service_pack（major+minor，5.3.19 前也存在）
 			return new(major, minor, build);
 		}
-
-		return new(ReadOne(), ReadOne());
 	}
 
 	/// <summary>读取主选项标志位（对应 load_flags）。</summary>

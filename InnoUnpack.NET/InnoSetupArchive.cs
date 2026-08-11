@@ -47,7 +47,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	public InnoSetupInfo Info { get; }
 
 	/// <summary>
-	///     可提取的文件总数（与 <see cref="EnumerateFiles" /> 一致，含过滤后的全部条目）。
+	///     可提取的文件总数（与 <see cref="EnumerateFiles()" /> 一致，含过滤后的全部条目）。
 	///     首次访问时计算并缓存。
 	/// </summary>
 	public int FileCount => GetFileStats().Count;
@@ -230,6 +230,19 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	/// <remarks>
 	///     路径通过 <see cref="InnoFilenameConverter" /> 展开变量（{app} → "app"）并清理。
 	/// </remarks>
+	/// <summary>
+	///     按过滤条件列出安装包中的文件（与 <see cref="ExtractionOptions.FileFilter" /> 语义一致，
+	///     可用于计算过滤后的进度总数）。
+	/// </summary>
+	public IEnumerable<InnoArchiveFile> EnumerateFiles(Func<InnoArchiveFile, bool> filter) {
+		ArgumentNullException.ThrowIfNull(filter);
+		foreach (var file in EnumerateFiles()) {
+			if (filter(file)) {
+				yield return file;
+			}
+		}
+	}
+
 	public IEnumerable<InnoArchiveFile> EnumerateFiles() {
 		foreach (var entry in Info.Files) {
 			if (entry.Location < 0 || entry.Location >= Info.DataEntries.Count) {
@@ -343,6 +356,10 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		List<InnoArchiveFile> files = [.. EnumerateFiles()];
 
 		var (extracted, filesExtracted) = ExtractByChunk(files, outputRoot, options, cancellationToken);
+		if (options.ApplyDirectoryAttributes) {
+			ApplyDirectoryAttributes(outputRoot);
+		}
+
 		options.RaiseProgressChanged(extracted, filesExtracted, null);
 	}
 
@@ -373,6 +390,10 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 
 		var (extracted, filesExtracted) =
 			await ExtractByChunkAsync(files, outputRoot, options, cancellationToken).ConfigureAwait(false);
+		if (options.ApplyDirectoryAttributes) {
+			ApplyDirectoryAttributes(outputRoot);
+		}
+
 		options.RaiseProgressChanged(extracted, filesExtracted, null);
 	}
 
@@ -398,7 +419,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 
 		if (singleChunk) {
 			files.Sort(static (a, b) => a.DataEntry.FileOffset.CompareTo(b.DataEntry.FileOffset));
-			return [new KeyValuePair<(uint FirstSlice, ulong Offset), List<InnoArchiveFile>>((first.FirstSlice, first.Offset), files)];
+			return [new((first.FirstSlice, first.Offset), files)];
 		}
 
 		var groups = new Dictionary<(uint FirstSlice, ulong Offset), List<InnoArchiveFile>>(files.Count);
@@ -447,6 +468,10 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 				foreach (var file in chunkFiles) {
 					cancellationToken.ThrowIfCancellationRequested();
 
+					if (options.FileFilter is not null && !options.FileFilter(file)) {
+						continue; // 过滤掉的文件不参与进度（总数用 EnumerateFiles(filter) 计算，保持一致）
+					}
+
 					if (ShouldSkipTemporary(file, options)) {
 						filesExtracted++;
 						ReportProgress(options, extracted, filesExtracted, file.Path);
@@ -454,6 +479,14 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 					}
 
 					var target = ResolveOutputPath(outputRoot, file.Path);
+					if (target is not null && options.OutputPathMapper is not null) {
+						var mapped = options.OutputPathMapper(file);
+						if (!string.IsNullOrEmpty(mapped)) {
+							// 映射路径同样需通过安全校验，不安全时回退默认路径
+							target = ResolveOutputPath(outputRoot, mapped) ?? target;
+						}
+					}
+
 					if (target is null) {
 						filesExtracted++; // 不安全路径，跳过
 						ReportProgress(options, extracted, filesExtracted, file.Path);
@@ -553,6 +586,10 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 				foreach (var file in chunkFiles) {
 					cancellationToken.ThrowIfCancellationRequested();
 
+					if (options.FileFilter is not null && !options.FileFilter(file)) {
+						continue; // 过滤掉的文件不参与进度（总数用 EnumerateFiles(filter) 计算，保持一致）
+					}
+
 					if (ShouldSkipTemporary(file, options)) {
 						filesExtracted++;
 						ReportProgress(options, extracted, filesExtracted, file.Path);
@@ -560,6 +597,14 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 					}
 
 					var target = ResolveOutputPath(outputRoot, file.Path);
+					if (target is not null && options.OutputPathMapper is not null) {
+						var mapped = options.OutputPathMapper(file);
+						if (!string.IsNullOrEmpty(mapped)) {
+							// 映射路径同样需通过安全校验，不安全时回退默认路径
+							target = ResolveOutputPath(outputRoot, mapped) ?? target;
+						}
+					}
+
 					if (target is null) {
 						filesExtracted++; // 不安全路径，跳过
 						ReportProgress(options, extracted, filesExtracted, file.Path);
@@ -672,6 +717,54 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 			var target = ResolveOutputPath(outputRoot, path);
 			if (target is not null) {
 				Directory.CreateDirectory(target);
+			}
+		}
+	}
+
+	/// <summary>
+	///     应用目录条目的权限与属性（提取完成后调用，避免只读目录阻碍文件写入）。
+	/// </summary>
+	private void ApplyDirectoryAttributes(string outputRoot) {
+		ApplyDirectoryAttributes(outputRoot, Info.Directories, _converter);
+	}
+
+	/// <summary>
+	///     应用目录条目的权限与属性：
+	///     POSIX 权限（<see cref="InnoDirectoryEntry.Permission" /> ≥ 0）在非 Windows 平台应用；
+	///     Windows 文件属性（<see cref="InnoDirectoryEntry.Attributes" /> 非 0）在 Windows 平台应用。
+	///     应用失败（权限不足/平台不支持）静默忽略，不影响提取结果。
+	/// </summary>
+	internal static void ApplyDirectoryAttributes(
+		string outputRoot,
+		IEnumerable<InnoDirectoryEntry> directories,
+		InnoFilenameConverter converter) {
+		foreach (var directory in directories) {
+			if ((directory.Options & InnoDirectoryOptions.DeleteAfterInstall) != 0) {
+				continue; // 临时目录不应用
+			}
+
+			var path = converter.Convert(directory.Name);
+			var target = ResolveOutputPath(outputRoot, path);
+			if (target is null || !Directory.Exists(target)) {
+				continue;
+			}
+
+			if (directory.Permission >= 0 && !OperatingSystem.IsWindows()) {
+				try {
+					File.SetUnixFileMode(target, (UnixFileMode)directory.Permission);
+				} catch (Exception ex) when (
+					ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) {
+					// 权限应用失败：静默忽略
+				}
+			}
+
+			if (directory.Attributes != 0 && OperatingSystem.IsWindows()) {
+				try {
+					File.SetAttributes(target, (FileAttributes)directory.Attributes & ~FileAttributes.Directory);
+				} catch (Exception ex) when (
+					ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) {
+					// 属性应用失败：静默忽略
+				}
 			}
 		}
 	}
