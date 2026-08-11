@@ -1,6 +1,6 @@
 # InnoUnpack.NET
 
-跨平台、纯C#的 [Inno Setup](https://jrsoftware.org/isinfo.php) 安装包解压库（.NET 10，**零 NuGet 依赖**）。
+跨平台、纯C#的 [Inno Setup](https://jrsoftware.org/isinfo.php) 安装包解压库（.NET 10， **零 NuGet 依赖**）。
 
 [![NuGet](https://img.shields.io/nuget/v/InnoUnpack.NET)](https://www.nuget.org/packages/InnoUnpack.NET)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -8,15 +8,16 @@
 ## 功能
 
 - 支持 **Inno Setup 4.0 – 7.x**（ANSI 与 Unicode，含 6.5.0+ 新版偏移表布局）
-- 压缩算法全覆盖：`stored` / `zlib` / `bzip2` / `LZMA1` / `LZMA2`（`bzip2` 自定义实现，`LZMA1`/`LZMA2` 移植自 LZMA SDK（Public Domain），`zlib` 使用 .NET 内置，零第三方依赖）
+- 压缩算法全覆盖：`stored` / `zlib` / `bzip2` / `LZMA1` / `LZMA2`（`bzip2` 自定义实现，`LZMA1`/`LZMA2` 移植自 LZMA
+  SDK（Public Domain），`zlib` 使用 .NET 内置，零第三方依赖）
 - 加密安装包解密：
-  - ARC4 + MD5（4.2.2 – 5.3.8）
-  - ARC4 + SHA1（5.3.9 – 6.3.x）
-  - XChaCha20（6.4.0+，含 6.5.0+ 独立加密头）
+    - ARC4 + MD5（4.2.2 – 5.3.8）
+    - ARC4 + SHA1（5.3.9 – 6.3.x）
+    - XChaCha20（6.4.0+，含 6.5.0+ 独立加密头）
 - 可执行文件调用指令优化还原（Call Instruction Optimizer，4.1.8+ 默认启用）
 - 文件校验和验证（MD5 / SHA1 / SHA256 / CRC32 / Adler32）
 - 异步 API（`OpenAsync` / `ExtractToDirectoryAsync` / `IAsyncDisposable`）
-- 基于**文件数**与**字节数**的进度报告（绝对进度，百分比由调用方计算）
+- 基于 **文件数**与 **字节数**的进度报告（绝对进度，百分比由调用方计算）
 - 路径安全防护（拒绝路径穿越与绝对路径）
 - **多磁盘安装包**（数据在 `setup-N.bin` 切片中）
 - **卸载程序提取**（4.x 包内嵌的卸载程序数据）
@@ -76,7 +77,7 @@ archive.ExtractToDirectory("output");
 
 ## 多磁盘安装包
 
-数据位于 `setup-N.bin` 切片中的安装包**无需特殊处理**，直接打开：
+数据位于 `setup-N.bin` 切片中的安装包 **无需特殊处理**，直接打开：
 
 ```csharp
 // setup.exe 的元数据内嵌，数据在同目录的 setup-1.bin / setup-2.bin ... 中
@@ -88,13 +89,13 @@ archive.ExtractToDirectory("output");
 
 ## 其他 API
 
-| API | 说明 |
-| --- | --- |
-| `IsInnoSetup(Stream)` / `IsInnoSetupAsync` | 无副作用检测（不改变流位置） |
-| `OpenFile(InnoArchiveFile)` | 打开单个文件的数据流 |
-| `InnoArchiveFile` | 源文件名 / 目标路径 / 大小 / 时间戳 / 文件版本 |
-| `InnoOpenOptions` | 强制代码页 / 密码 / 路径变量映射 |
-| `ExtractionOptions` | 时间戳保留 / 校验和验证 / 覆盖策略 / 进度报告 |
+| API                                        | 说明                                           |
+|--------------------------------------------|------------------------------------------------|
+| `IsInnoSetup(Stream)` / `IsInnoSetupAsync` | 无副作用检测（不改变流位置）                   |
+| `OpenFile(InnoArchiveFile)`                | 打开单个文件的数据流                           |
+| `InnoArchiveFile`                          | 源文件名 / 目标路径 / 大小 / 时间戳 / 文件版本 |
+| `InnoOpenOptions`                          | 强制代码页 / 密码 / 路径变量映射               |
+| `ExtractionOptions`                        | 时间戳保留 / 校验和验证 / 覆盖策略 / 进度报告  |
 
 ## 支持范围
 
@@ -102,22 +103,22 @@ archive.ExtractToDirectory("output");
 - **依赖：零**（无 NuGet 依赖；`bzip2` 与加密算法自定义实现，`LZMA1`/`LZMA2` 移植自 LZMA SDK，`zlib` 使用 .NET 内置）
 - **NativeAOT 兼容**（无反射，可 `PublishAot=true` 发布为原生二进制）
 - 已知限制：
-  - 5.x+ 安装包的卸载程序（UninstExe）数据由安装器运行时生成，不包含在包内（不提取）
-  - 加密安装包的 6.5.0+ 解密支持经过算法级验证，但尚未经真实加密样本端到端验证
+    - 5.x+ 安装包的卸载程序（UninstExe）数据由安装器运行时生成，不包含在包内（不提取）
+    - 加密安装包的 6.5.0+ 解密支持经过算法级验证，但尚未经真实加密样本端到端验证
 
 ## 性能
 
 ### 与 innoextract 对比（同等条件）
 
-同一文件集（排除 innoextract 默认跳过的卸载程序）、关闭校验和与时间戳、相同输出目录、
-**best-of-7**。测试机：i5-9300H，Linux，测试夹具为 Inno Setup 官方安装器（innoextract 1.9
+同一文件集（排除 innoextract 默认跳过的卸载程序）、关闭校验和与时间戳、相同输出目录、 **best-of-7**。测试机：i5-9300H，Linux，测试夹具为
+Inno Setup 官方安装器（innoextract 1.9
 仅支持到 Inno Setup 6.0.5，故可对比 3 个）：
 
-| fixture | 大小 | innoextract | 本库 JIT（冷进程） | 本库 JIT（热路径） | 本库 AOT-Speed（冷进程） |
-| --- | --- | --- | --- | --- | --- |
-| isetup-4.2.7.exe（LZMA1） | 2.9 MiB | 41 ms | 130 ms | 84 ms | **86 ms** |
-| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB | 87 ms | 168 ms | 114 ms | **117 ms** |
-| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB | 96 ms | 156 ms | 112 ms | **114 ms** |
+| fixture                              | 大小    | innoextract | 本库 JIT（冷进程） | 本库 JIT（热路径） | 本库 AOT-Speed（冷进程） |
+|--------------------------------------|---------|-------------|--------------------|--------------------|--------------------------|
+| isetup-4.2.7.exe（LZMA1）            | 2.9 MiB | 41 ms       | 130 ms             | 84 ms              | **86 ms**                |
+| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB | 87 ms       | 168 ms             | 114 ms             | **117 ms**               |
+| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB | 96 ms       | 156 ms             | 112 ms             | **114 ms**               |
 
 - **热路径（库场景，进程内预热）**：与 innoextract 差距约 **1.2–2.1x**，剩余差距来自
   纯托管 LZMA 位解码器 vs liblzma 的原生标量代码（LZMA range coder 为串行位依赖，双方均无 SIMD）
@@ -129,11 +130,11 @@ archive.ExtractToDirectory("output");
 `dotnet publish tools/bench -c Release -r linux-x64 -p:PublishAot=true -p:OptimizationPreference=<模式>`，
 冷进程单次提取（同等条件，best-of-7）：
 
-| fixture | Default | Speed | Size |
-| --- | --- | --- | --- |
-| isetup-4.2.7.exe | 116 ms | **86 ms** | 116 ms |
-| innosetup-5.5.9-unicode.exe | 154 ms | **117 ms** | 157 ms |
-| innosetup-5.6.1-unicode.exe | 151 ms | **114 ms** | 153 ms |
+| fixture                     | Default | Speed      | Size   |
+|-----------------------------|---------|------------|--------|
+| isetup-4.2.7.exe            | 116 ms  | **86 ms**  | 116 ms |
+| innosetup-5.5.9-unicode.exe | 154 ms  | **117 ms** | 157 ms |
+| innosetup-5.6.1-unicode.exe | 151 ms  | **114 ms** | 153 ms |
 
 `OptimizationPreference=Speed` 耗时为 Default/Size 的 **0.74–0.76 倍**（快约 32–35%）；
 热路径下 AOT-Speed 与 JIT 持平，Default/Size 约慢 30% 左右（JIT 分层编译对热点循环生成更好的代码）。
@@ -141,17 +142,17 @@ archive.ExtractToDirectory("output");
 
 ### 本库全量提取（公共 API 默认选项，含 SHA256 校验，best-of-3）
 
-| fixture | 大小 | JIT | AOT-Speed |
-| --- | --- | --- | --- |
-| isetup-4.2.7.exe（LZMA1） | 3.0 MiB | 101 ms | 93 ms |
-| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB | 130 ms | 120 ms |
-| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB | 121 ms | 116 ms |
-| innosetup-6.7.3.exe（LZMA2） | 27.6 MiB | 588 ms | 614 ms |
-| innosetup-7.0.2-x64.exe（LZMA2） | 49.0 MiB | 1056 ms | 1087 ms |
+| fixture                              | 大小     | JIT     | AOT-Speed |
+|--------------------------------------|----------|---------|-----------|
+| isetup-4.2.7.exe（LZMA1）            | 3.0 MiB  | 101 ms  | 93 ms     |
+| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB  | 130 ms  | 120 ms    |
+| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB  | 121 ms  | 116 ms    |
+| innosetup-6.7.3.exe（LZMA2）         | 27.6 MiB | 588 ms  | 614 ms    |
+| innosetup-7.0.2-x64.exe（LZMA2）     | 49.0 MiB | 1056 ms | 1087 ms   |
 
 ### 内存
 
-- 解码器字典/概率表/输入输出缓冲全部经 `ArrayPool` 租用并在流销毁时归还：**大缓冲零分配、
+- 解码器字典/概率表/输入输出缓冲全部经 `ArrayPool` 租用并在流销毁时归还： **大缓冲零分配、
   提取全程 GC 零收集**（gc0/gc1/gc2 均为 0 次）；池预热后单次提取仅约 0.6 MiB 小对象分配
 - 文件写出使用 `RandomAccess` 直接 OS 写入，无 FileStream 内部缓冲分配
 

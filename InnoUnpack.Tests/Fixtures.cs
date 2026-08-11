@@ -30,7 +30,8 @@ static class Fixtures {
 				dir = dir.Parent;
 			}
 
-			throw new FileNotFoundException("未找到 Fixtures 目录，请先运行 tools/download-fixtures.sh（Windows: tools/download-fixtures.ps1）");
+			throw new FileNotFoundException(
+				"未找到 Fixtures 目录，请先运行 tools/download-fixtures.sh（Windows: tools/download-fixtures.ps1）");
 		}
 	}
 

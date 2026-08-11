@@ -782,14 +782,32 @@ public sealed class InnoHeader {
 		StoredFlagReader flags = new(reader);
 
 		flags.Add(0); // DisableStartupPrompt
-		if (v.Lt5310) flags.Add(1); // Uninstallable
+		if (v.Lt5310) {
+			flags.Add(1); // Uninstallable
+		}
+
 		flags.Add(2); // CreateAppDir
-		if (v.Lt533) flags.Add(3); // DisableDirPage
-		if (v.Lt136) flags.Add(4); // DisableDirExistsWarning
-		if (v.Lt533) flags.Add(5); // DisableProgramGroupPage
+		if (v.Lt533) {
+			flags.Add(3); // DisableDirPage
+		}
+
+		if (v.Lt136) {
+			flags.Add(4); // DisableDirExistsWarning
+		}
+
+		if (v.Lt533) {
+			flags.Add(5); // DisableProgramGroupPage
+		}
+
 		flags.Add(6); // AllowNoIcons
-		if (v.Lt300 || v.Ge303) flags.Add(7); // AlwaysRestart
-		if (v.Lt133) flags.Add(8); // BackSolid
+		if (v.Lt300 || v.Ge303) {
+			flags.Add(7); // AlwaysRestart
+		}
+
+		if (v.Lt133) {
+			flags.Add(8); // BackSolid
+		}
+
 		flags.Add(9); // AlwaysUsePersonalGroup
 		if (v.Lt6401) {
 			flags.Add(10); // WindowVisible
@@ -799,26 +817,68 @@ public sealed class InnoHeader {
 		}
 
 		flags.Add(14); // EnableDirDoesntExistWarning
-		if (v.Lt412) flags.Add(15); // DisableAppendDir
+		if (v.Lt412) {
+			flags.Add(15); // DisableAppendDir
+		}
+
 		flags.Add(16); // Password
-		if (v.Ge126) flags.Add(17); // AllowRootDirectory
-		if (v.Ge1214) flags.Add(18); // DisableFinishedPage
-		if (v.Lt304) flags.Add(19); // AdminPrivilegesRequired
-		if (v.Lt300) flags.Add(20); // AlwaysCreateUninstallIcon
-		if (v.Lt136) flags.Add(21); // OverwriteUninstRegEntries
-		if (v.Lt561) flags.Add(22); // ChangesAssociations
-		if (v is { Ge130: true, Lt538: true }) flags.Add(23); // CreateUninstallRegKey
-		if (v is { Ge131: true, Lt670: true }) flags.Add(24); // UsePreviousAppDir
-		if (v is { Ge133: true, Lt6401: true }) flags.Add(25); // BackColorHorizontal
-		if (v is { Ge1310: true, Lt670: true }) flags.Add(26); // UsePreviousGroup
-		if (v.Ge1320) flags.Add(27); // UpdateUninstallLogAppName
-		if (v is { Ge200: true, Lt670: true }) flags.Add(28); // UsePreviousSetupType
+		if (v.Ge126) {
+			flags.Add(17); // AllowRootDirectory
+		}
+
+		if (v.Ge1214) {
+			flags.Add(18); // DisableFinishedPage
+		}
+
+		if (v.Lt304) {
+			flags.Add(19); // AdminPrivilegesRequired
+		}
+
+		if (v.Lt300) {
+			flags.Add(20); // AlwaysCreateUninstallIcon
+		}
+
+		if (v.Lt136) {
+			flags.Add(21); // OverwriteUninstRegEntries
+		}
+
+		if (v.Lt561) {
+			flags.Add(22); // ChangesAssociations
+		}
+
+		if (v is { Ge130: true, Lt538: true }) {
+			flags.Add(23); // CreateUninstallRegKey
+		}
+
+		if (v is { Ge131: true, Lt670: true }) {
+			flags.Add(24); // UsePreviousAppDir
+		}
+
+		if (v is { Ge133: true, Lt6401: true }) {
+			flags.Add(25); // BackColorHorizontal
+		}
+
+		if (v is { Ge1310: true, Lt670: true }) {
+			flags.Add(26); // UsePreviousGroup
+		}
+
+		if (v.Ge1320) {
+			flags.Add(27); // UpdateUninstallLogAppName
+		}
+
+		if (v is { Ge200: true, Lt670: true }) {
+			flags.Add(28); // UsePreviousSetupType
+		}
+
 		if (v.Ge200) {
 			flags.Add(29); // DisableReadyMemo
 			flags.Add(30); // AlwaysShowComponentsList
 			flags.Add(31); // FlatComponentsList
 			flags.Add(32); // ShowComponentSizes
-			if (v.Lt670) flags.Add(33); // UsePreviousTasks
+			if (v.Lt670) {
+				flags.Add(33); // UsePreviousTasks
+			}
+
 			flags.Add(34); // DisableReadyPage
 		}
 
@@ -827,37 +887,84 @@ public sealed class InnoHeader {
 			flags.Add(36); // AlwaysShowGroupOnReadyPage
 		}
 
-		if (v is { Ge2017: true, Lt415: true }) flags.Add(37); // BzipUsed
-		if (v.Ge2018) flags.Add(38); // AllowUNCPath
-		if (v.Ge300) {
-			flags.Add(39); // UserInfoPage
-			if (v.Lt670) flags.Add(40); // UsePreviousUserInfo
+		if (v is { Ge2017: true, Lt415: true }) {
+			flags.Add(37); // BzipUsed
 		}
 
-		if (v.Ge301) flags.Add(41); // UninstallRestartComputer
-		if (v.Ge303) flags.Add(42); // RestartIfNeededByRun
-		if (v.Ge400) flags.Add(43); // ShowTasksTreeLines
-		if (v is { Ge400: true, Lt4010: true }) flags.Add(44); // ShowLanguageDialog
-		if (v is { Ge401: true, Lt4010: true }) flags.Add(45); // DetectLanguageUsingLocale
+		if (v.Ge2018) {
+			flags.Add(38); // AllowUNCPath
+		}
+
+		if (v.Ge300) {
+			flags.Add(39); // UserInfoPage
+			if (v.Lt670) {
+				flags.Add(40); // UsePreviousUserInfo
+			}
+		}
+
+		if (v.Ge301) {
+			flags.Add(41); // UninstallRestartComputer
+		}
+
+		if (v.Ge303) {
+			flags.Add(42); // RestartIfNeededByRun
+		}
+
+		if (v.Ge400) {
+			flags.Add(43); // ShowTasksTreeLines
+		}
+
+		if (v is { Ge400: true, Lt4010: true }) {
+			flags.Add(44); // ShowLanguageDialog
+		}
+
+		if (v is { Ge401: true, Lt4010: true }) {
+			flags.Add(45); // DetectLanguageUsingLocale
+		}
+
 		if (v.Ge409) {
 			flags.Add(46); // AllowCancelDuringInstall
 		} else {
 			raw.Options |= 1UL << 46;
 		}
 
-		if (v.Ge413) flags.Add(47); // WizardImageStretch
+		if (v.Ge413) {
+			flags.Add(47); // WizardImageStretch
+		}
+
 		if (v.Ge418) {
 			flags.Add(48); // AppendDefaultDirName
 			flags.Add(49); // AppendDefaultGroupName
 		}
 
-		if (v is { Ge422: true, Lt650: true }) flags.Add(50); // EncryptionUsed
-		if (v is { Ge504: true, Lt561: true }) flags.Add(51); // ChangesEnvironment
-		if (v.Ge517 && !version.IsUnicode) flags.Add(52); // ShowUndisplayableLanguages
-		if (v.Ge5113) flags.Add(53); // SetupLogging
-		if (v.Ge521) flags.Add(54); // SignedUninstaller
-		if (v.Ge538) flags.Add(55); // UsePreviousLanguage
-		if (v.Ge539) flags.Add(56); // DisableWelcomePage
+		if (v is { Ge422: true, Lt650: true }) {
+			flags.Add(50); // EncryptionUsed
+		}
+
+		if (v is { Ge504: true, Lt561: true }) {
+			flags.Add(51); // ChangesEnvironment
+		}
+
+		if (v.Ge517 && !version.IsUnicode) {
+			flags.Add(52); // ShowUndisplayableLanguages
+		}
+
+		if (v.Ge5113) {
+			flags.Add(53); // SetupLogging
+		}
+
+		if (v.Ge521) {
+			flags.Add(54); // SignedUninstaller
+		}
+
+		if (v.Ge538) {
+			flags.Add(55); // UsePreviousLanguage
+		}
+
+		if (v.Ge539) {
+			flags.Add(56); // DisableWelcomePage
+		}
+
 		if (v.Ge550) {
 			flags.Add(57); // CloseApplications
 			flags.Add(58); // RestartApplications
@@ -866,19 +973,29 @@ public sealed class InnoHeader {
 			raw.Options |= 1UL << 59;
 		}
 
-		if (v.Ge557) flags.Add(60); // ForceCloseApplications
+		if (v.Ge557) {
+			flags.Add(60); // ForceCloseApplications
+		}
+
 		if (v.Ge600) {
 			flags.Add(61); // AppNameHasConsts
 			flags.Add(62); // UsePreviousPrivileges
-			if (v.Lt660) flags.Add(63); // WizardResizable
+			if (v.Lt660) {
+				flags.Add(63); // WizardResizable
+			}
 		}
 
-		if (v.Ge630) flags.Add(64); // UninstallLogging
+		if (v.Ge630) {
+			flags.Add(64); // UninstallLogging
+		}
+
 		if (v.Ge660) {
 			flags.Add(65); // WizardModern
 			flags.Add(66); // WizardBorderStyled
 			flags.Add(67); // WizardKeepAspectRatio
-			if (v.Lt670) flags.Add(68); // WizardLightButtonsUnstyled
+			if (v.Lt670) {
+				flags.Add(68); // WizardLightButtonsUnstyled
+			}
 		}
 
 		if (v.Ge670) {

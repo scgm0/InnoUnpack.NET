@@ -144,8 +144,8 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	/// <exception cref="InnoUnsupportedException">
 	///     多磁盘安装包（数据在外部 setup-N.bin 切片中）必须使用 <see cref="Open(string, InnoOpenOptions)"/> 打开。
 	/// </exception>
-	public static InnoSetupArchive Open(Stream stream, InnoOpenOptions? options = null, bool leaveOpen = false)
-		=> OpenCore(stream, options, leaveOpen, installerPath: null);
+	public static InnoSetupArchive Open(Stream stream, InnoOpenOptions? options = null, bool leaveOpen = false) =>
+		OpenCore(stream, options, leaveOpen, installerPath: null);
 
 	static private InnoSetupArchive OpenCore(Stream stream, InnoOpenOptions? options, bool leaveOpen, string? installerPath) {
 		ArgumentNullException.ThrowIfNull(stream);
@@ -168,6 +168,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 			if (installerPath is null) {
 				throw new InnoUnsupportedException("多磁盘安装包（数据在外部 setup-N.bin 切片中）需要从文件路径打开");
 			}
+
 			var dir = Path.GetDirectoryName(installerPath)
 				?? throw new InnoFormatException($"无法解析安装包路径：{installerPath}");
 			var basename = Path.GetFileNameWithoutExtension(installerPath);
@@ -177,6 +178,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 				&& !string.IsNullOrEmpty(basename2)) {
 				(basename, basename2) = (basename2, basename);
 			}
+
 			slices = SliceReader.CreateExternal(dir, basename, basename2, info.Header.SlicesPerDisk);
 		}
 
@@ -363,7 +365,8 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 
 		List<InnoArchiveFile> files = [.. EnumerateFiles()];
 
-		var (extracted, filesExtracted) = await ExtractByChunkAsync(files, outputRoot, options, cancellationToken).ConfigureAwait(false);
+		var (extracted, filesExtracted) =
+			await ExtractByChunkAsync(files, outputRoot, options, cancellationToken).ConfigureAwait(false);
 		options.RaiseProgressChanged(extracted, filesExtracted, null);
 	}
 
@@ -372,14 +375,16 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	///     组内文件按数据偏移（<see cref="InnoDataEntry.FileOffset" />）顺序流式取出。
 	/// </summary>
 	internal (ulong Extracted, int FilesExtracted) ExtractByChunk(
-		List<InnoArchiveFile> files, string outputRoot, ExtractionOptions options) {
+		List<InnoArchiveFile> files,
+		string outputRoot,
+		ExtractionOptions options) {
 		ulong extracted = 0;
 		var filesExtracted = 0;
 
 		foreach (var group in files
-			         .GroupBy(file => (file.DataEntry.FirstSlice, file.DataEntry.Offset))
-			         .OrderBy(g => g.Key.FirstSlice)
-			         .ThenBy(g => g.Key.Offset)) {
+			.GroupBy(file => (file.DataEntry.FirstSlice, file.DataEntry.Offset))
+			.OrderBy(g => g.Key.FirstSlice)
+			.ThenBy(g => g.Key.Offset)) {
 			var chunk = ChunkReader.Open(_slices, group.First().DataEntry, _crypto);
 			var chunkStream = chunk.Stream;
 			long chunkPos = 0;
@@ -425,7 +430,11 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 					}
 
 					using (var source = CreateFileSource(chunkStream, file))
-					using (var output = File.OpenHandle(target, FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.SequentialScan)) {
+					using (var output = File.OpenHandle(target,
+						FileMode.Create,
+						FileAccess.Write,
+						FileShare.None,
+						FileOptions.SequentialScan)) {
 						var remaining = (long)file.Size;
 						long writeOffset = 0;
 						using var hasher = options.VerifyChecksums
@@ -478,9 +487,9 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		var filesExtracted = 0;
 
 		foreach (var group in files
-			         .GroupBy(file => (file.DataEntry.FirstSlice, file.DataEntry.Offset))
-			         .OrderBy(g => g.Key.FirstSlice)
-			         .ThenBy(g => g.Key.Offset)) {
+			.GroupBy(file => (file.DataEntry.FirstSlice, file.DataEntry.Offset))
+			.OrderBy(g => g.Key.FirstSlice)
+			.ThenBy(g => g.Key.Offset)) {
 			var chunk = ChunkReader.Open(_slices, group.First().DataEntry, _crypto);
 			var chunkStream = chunk.Stream;
 			long chunkPos = 0;
@@ -547,7 +556,8 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 							}
 
 							// 直接 OS 异步写入（无 FileStream 内部缓冲分配）
-							await RandomAccess.WriteAsync(output, buffer.AsMemory(0, n), writeOffset, cancellationToken).ConfigureAwait(false);
+							await RandomAccess.WriteAsync(output, buffer.AsMemory(0, n), writeOffset, cancellationToken)
+								.ConfigureAwait(false);
 							writeOffset += n;
 							hasher?.Update(buffer.AsSpan(0, n));
 							remaining -= n;
@@ -573,8 +583,8 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		return (extracted, filesExtracted);
 	}
 
-	static private bool ShouldSkipTemporary(InnoArchiveFile file, ExtractionOptions options)
-		=> !options.ExtractTemporaryFiles && (file.Options & InnoFileOptions.DeleteAfterInstall) != 0;
+	static private bool ShouldSkipTemporary(InnoArchiveFile file, ExtractionOptions options) =>
+		!options.ExtractTemporaryFiles && (file.Options & InnoFileOptions.DeleteAfterInstall) != 0;
 
 	static private void EnsureParentDirectory(string target) {
 		var dir = Path.GetDirectoryName(target)

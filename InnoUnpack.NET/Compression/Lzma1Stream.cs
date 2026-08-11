@@ -25,7 +25,7 @@ sealed class Lzma1Stream : Stream {
 	private readonly Stream _input;
 	private bool _disposed;
 	private bool _eof;
-	private byte[] _pending = Array.Empty<byte>();
+	private byte[] _pending = [];
 	private bool _pendingRented;
 	private int _pendingLen;
 	private int _pendingPos;
@@ -116,7 +116,7 @@ sealed class Lzma1Stream : Stream {
 				if (_pendingRented) {
 					ArrayPool<byte>.Shared.Return(_pending);
 					_pendingRented = false;
-					_pending = Array.Empty<byte>();
+					_pending = [];
 				}
 			}
 		}

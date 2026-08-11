@@ -155,23 +155,74 @@ public sealed class InnoFileEntry {
 		flags.Add(6); // SharedFile
 		flags.Add(7); // CompareTimeStamp
 		flags.Add(8); // FontIsNotTrueType
-		if (v.Ge125) flags.Add(9); // SkipIfSourceDoesntExist
-		if (v.Ge126) flags.Add(10); // OverwriteReadOnly
-		if (v.Ge1321) flags.Add(11); // OverwriteSameVersion
-		if (v.Ge1321) flags.Add(12); // CustomDestName
-		if (v.Ge1325) flags.Add(13); // OnlyIfDestFileExists
-		if (v.Ge205) flags.Add(14); // NoRegError
-		if (v.Ge301) flags.Add(15); // UninsRestartDelete
-		if (v.Ge305) flags.Add(16); // OnlyIfDoesntExist
-		if (v.Ge305) flags.Add(17); // IgnoreVersion
-		if (v.Ge305) flags.Add(18); // PromptIfOlder
-		if (v.Ge400) flags.Add(19); // DontCopy
-		if (v.Ge405) flags.Add(20); // UninsRemoveReadOnly
-		if (v.Ge418) flags.Add(21); // RecurseSubDirsExternal
-		if (v.Ge421) flags.Add(22); // ReplaceSameVersionIfContentsDiffer
-		if (v.Ge425) flags.Add(23); // DontVerifyChecksum
-		if (v.Ge503) flags.Add(24); // UninsNoSharedFilePrompt
-		if (v.Ge510) flags.Add(25); // CreateAllSubDirs
+		if (v.Ge125) {
+			flags.Add(9); // SkipIfSourceDoesntExist
+		}
+
+		if (v.Ge126) {
+			flags.Add(10); // OverwriteReadOnly
+		}
+
+		if (v.Ge1321) {
+			flags.Add(11); // OverwriteSameVersion
+		}
+
+		if (v.Ge1321) {
+			flags.Add(12); // CustomDestName
+		}
+
+		if (v.Ge1325) {
+			flags.Add(13); // OnlyIfDestFileExists
+		}
+
+		if (v.Ge205) {
+			flags.Add(14); // NoRegError
+		}
+
+		if (v.Ge301) {
+			flags.Add(15); // UninsRestartDelete
+		}
+
+		if (v.Ge305) {
+			flags.Add(16); // OnlyIfDoesntExist
+		}
+
+		if (v.Ge305) {
+			flags.Add(17); // IgnoreVersion
+		}
+
+		if (v.Ge305) {
+			flags.Add(18); // PromptIfOlder
+		}
+
+		if (v.Ge400) {
+			flags.Add(19); // DontCopy
+		}
+
+		if (v.Ge405) {
+			flags.Add(20); // UninsRemoveReadOnly
+		}
+
+		if (v.Ge418) {
+			flags.Add(21); // RecurseSubDirsExternal
+		}
+
+		if (v.Ge421) {
+			flags.Add(22); // ReplaceSameVersionIfContentsDiffer
+		}
+
+		if (v.Ge425) {
+			flags.Add(23); // DontVerifyChecksum
+		}
+
+		if (v.Ge503) {
+			flags.Add(24); // UninsNoSharedFilePrompt
+		}
+
+		if (v.Ge510) {
+			flags.Add(25); // CreateAllSubDirs
+		}
+
 		if (v is { Ge512: true, Lt7003: true }) {
 			flags.Add(26); // Bits32
 			flags.Add(27); // Bits64
@@ -183,7 +234,10 @@ public sealed class InnoFileEntry {
 			flags.Add(30); // UnsetNtfsCompression
 		}
 
-		if (v.Ge525) flags.Add(31); // GacInstall
+		if (v.Ge525) {
+			flags.Add(31); // GacInstall
+		}
+
 		if (v.Ge650) {
 			flags.Add(32); // Download
 			flags.Add(33); // ExtractArchive

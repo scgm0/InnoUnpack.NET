@@ -100,7 +100,7 @@ public sealed class InnoSetupInfo {
 
 			var next = InnoVersionParser.Next(current.Value);
 			if (next is null || next == current.Value) {
-				throw lastError ?? new InnoFormatException("无法解析安装包元数据");
+				throw lastError;
 			}
 
 			current = next;
@@ -333,7 +333,7 @@ public sealed class InnoSetupInfo {
 		for (var i = 0; i < count; i++) {
 			var wl = reader.ReadBytes(4);
 			var wlen = BitConverter.ToInt32(wl, 0);
-			var wb = reader.ReadBytes(wlen);
+			reader.Skip(wlen);
 		}
 	}
 
@@ -468,13 +468,27 @@ public sealed class InnoSetupInfo {
 
 		SkipFlagReader flags = new(reader);
 		flags.Add(); // NeverUninstall
-		if (!Ge(version, 1, 3, 26)) flags.Add(); // RunMinimized
+		if (!Ge(version, 1, 3, 26)) {
+			flags.Add(); // RunMinimized
+		}
+
 		flags.Add(); // CreateOnlyIfFileExists
 		flags.Add(); // UseAppPaths
-		if (Ge(version, 5, 0, 3) && !Ge(version, 6, 3, 0)) flags.Add(); // FolderShortcut
-		if (Ge(version, 5, 4, 2)) flags.Add(); // ExcludeFromShowInNewInstall
-		if (Ge(version, 5, 5, 0)) flags.Add(); // PreventPinning
-		if (Ge(version, 6, 1, 0)) flags.Add(); // HasAppUserModelToastActivatorCLSID
+		if (Ge(version, 5, 0, 3) && !Ge(version, 6, 3, 0)) {
+			flags.Add(); // FolderShortcut
+		}
+
+		if (Ge(version, 5, 4, 2)) {
+			flags.Add(); // ExcludeFromShowInNewInstall
+		}
+
+		if (Ge(version, 5, 5, 0)) {
+			flags.Add(); // PreventPinning
+		}
+
+		if (Ge(version, 6, 1, 0)) {
+			flags.Add(); // HasAppUserModelToastActivatorCLSID
+		}
 	}
 
 	static private void SkipIniEntry(InnoBinaryReader reader, InnoVersion version) {
@@ -509,14 +523,23 @@ public sealed class InnoSetupInfo {
 		flags.Add(); // UninsClearValue
 		flags.Add(); // UninsDeleteEntireKey
 		flags.Add(); // UninsDeleteEntireKeyIfEmpty
-		if (Ge(version, 1, 2, 6)) flags.Add(); // PreserveStringType
+		if (Ge(version, 1, 2, 6)) {
+			flags.Add(); // PreserveStringType
+		}
+
 		if (Ge(version, 1, 3, 9)) {
 			flags.Add();
 			flags.Add();
 		} // DeleteKey, DeleteValue
 
-		if (Ge(version, 1, 3, 12)) flags.Add(); // NoError
-		if (Ge(version, 1, 3, 16)) flags.Add(); // DontCreateKey
+		if (Ge(version, 1, 3, 12)) {
+			flags.Add(); // NoError
+		}
+
+		if (Ge(version, 1, 3, 16)) {
+			flags.Add(); // DontCreateKey
+		}
+
 		if (Ge(version, 5, 1, 0) && !Ge(version, 7, 0, 0, 3)) {
 			flags.Add();
 			flags.Add();
@@ -566,8 +589,14 @@ public sealed class InnoSetupInfo {
 		}
 
 		SkipFlagReader flags = new(reader);
-		if (Ge(version, 1, 2, 3)) flags.Add(); // ShellExec
-		if (Ge(version, 1, 3, 9)) flags.Add(); // SkipIfDoesntExist
+		if (Ge(version, 1, 2, 3)) {
+			flags.Add(); // ShellExec
+		}
+
+		if (Ge(version, 1, 3, 9)) {
+			flags.Add(); // SkipIfDoesntExist
+		}
+
 		if (Ge(version, 2, 0, 0)) {
 			flags.Add();
 			flags.Add();
@@ -575,15 +604,26 @@ public sealed class InnoSetupInfo {
 			flags.Add();
 		} // PostInstall, Unchecked, SkipIfSilent, SkipIfNotSilent
 
-		if (Ge(version, 2, 0, 8)) flags.Add(); // HideWizard
+		if (Ge(version, 2, 0, 8)) {
+			flags.Add(); // HideWizard
+		}
+
 		if (Ge(version, 5, 1, 10) && !Ge(version, 7, 0, 0, 3)) {
 			flags.Add();
 			flags.Add();
 		} // Bits32, Bits64
 
-		if (Ge(version, 5, 2, 0)) flags.Add(); // RunAsOriginalUser
-		if (Ge(version, 6, 1, 0)) flags.Add(); // DontLogParameters
-		if (Ge(version, 6, 3, 0)) flags.Add(); // LogOutput
+		if (Ge(version, 5, 2, 0)) {
+			flags.Add(); // RunAsOriginalUser
+		}
+
+		if (Ge(version, 6, 1, 0)) {
+			flags.Add(); // DontLogParameters
+		}
+
+		if (Ge(version, 6, 3, 0)) {
+			flags.Add(); // LogOutput
+		}
 	}
 
 	/// <summary>跳过条目条件字符串（components/tasks/languages/check/after_install/before_install）。</summary>

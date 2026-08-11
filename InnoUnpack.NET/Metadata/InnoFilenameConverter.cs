@@ -40,7 +40,7 @@ public sealed class InnoFilenameConverter {
 	public static string ReplaceUnsafeChars(string path) {
 		StringBuilder builder = new(path.Length);
 		foreach (var c in path) {
-			builder.Append(c < 32 || UnsafeChars.IndexOf(c) >= 0 ? '$' : c);
+			builder.Append(c < 32 || UnsafeChars.Contains(c) ? '$' : c);
 		}
 
 		return builder.ToString();
@@ -97,26 +97,28 @@ public sealed class InnoFilenameConverter {
 	/// </summary>
 	static private string ShortenPath(string path) {
 		var separator = Path.DirectorySeparatorChar;
-		List<string> segments = new();
+		List<string> segments = [];
 		var start = 0;
 		for (var i = 0; i <= path.Length; i++) {
-			if (i == path.Length || path[i] == '\\' || path[i] == '/') {
-				var segment = path[start..i];
-				start = i + 1;
-				if (segment.Length == 0 || segment == ".") {
-					continue;
-				}
-
-				if (segment == "..") {
-					if (segments.Count > 0) {
-						segments.RemoveAt(segments.Count - 1);
-					}
-
-					continue;
-				}
-
-				segments.Add(segment);
+			if (i < path.Length && path[i] != '\\' && path[i] != '/') {
+				continue;
 			}
+
+			var segment = path[start..i];
+			start = i + 1;
+			if (segment.Length == 0 || segment == ".") {
+				continue;
+			}
+
+			if (segment == "..") {
+				if (segments.Count > 0) {
+					segments.RemoveAt(segments.Count - 1);
+				}
+
+				continue;
+			}
+
+			segments.Add(segment);
 		}
 
 		return string.Join(separator, segments);

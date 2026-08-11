@@ -157,7 +157,16 @@ sealed class BZip2Decoder(Stream input) {
 
 		// 主数据：解码符号流（RUNA/RUNB 展开）到 MTF 索引数组
 		EnsureCapacity(ref _mtfIndex, maxBlock);
-		var nblock = DecodeSymbolStream(nInUse, nSelectors, selector, minLen, maxLen, prefix, perm, startCode, endCode, maxBlock);
+		var nblock = DecodeSymbolStream(nInUse,
+			nSelectors,
+			selector,
+			minLen,
+			maxLen,
+			prefix,
+			perm,
+			startCode,
+			endCode,
+			maxBlock);
 		if (nblock == 0) {
 			throw new InnoFormatException("bzip2 块为空");
 		}
@@ -193,8 +202,15 @@ sealed class BZip2Decoder(Stream input) {
 
 	/// <summary>主数据：解码符号流（RUNA/RUNB 展开）到 MTF 索引数组，返回 BWT 符号数。</summary>
 	private int DecodeSymbolStream(
-		int nInUse, int nSelectors, int[] selector,
-		int[] minLen, int[] maxLen, int[][] prefix, int[][] perm, int[][] startCode, int[][] endCode,
+		int nInUse,
+		int nSelectors,
+		int[] selector,
+		int[] minLen,
+		int[] maxLen,
+		int[][] prefix,
+		int[][] perm,
+		int[][] startCode,
+		int[][] endCode,
 		int maxBlock) {
 		var nblock = 0;
 		var groupNo = -1;
@@ -298,7 +314,13 @@ sealed class BZip2Decoder(Stream input) {
 	}
 
 	/// <summary>BWT 逆变换（计数排序 + LF 映射）与 RLE1 展开，输出块解压数据。</summary>
-	static private int InverseBwtAndRle1(ReadOnlySpan<byte> bwt, Span<int> next, int nblock, int origPtr, Span<byte> output, int maxBlock) {
+	static private int InverseBwtAndRle1(
+		ReadOnlySpan<byte> bwt,
+		Span<int> next,
+		int nblock,
+		int origPtr,
+		Span<byte> output,
+		int maxBlock) {
 		var cftab = new int[257];
 		for (var i = 0; i < nblock; i++) {
 			cftab[bwt[i] + 1]++;

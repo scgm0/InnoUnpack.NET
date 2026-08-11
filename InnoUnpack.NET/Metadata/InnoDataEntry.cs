@@ -107,23 +107,44 @@ public sealed class InnoDataEntry {
 		var versionLs = reader.ReadUInt32();
 		entry.FileVersion = (ulong)versionMs << 32 | versionLs;
 
-		ulong options = 0;
 		FlagReader flags = new(reader);
 		flags.Add(0); // VersionInfoValid
-		if (v.Lt643) flags.Add(1); // VersionInfoNotValid
-		if (v is { Ge2017: true, Lt401: true }) flags.Add(2); // BZipped
-		if (v.Ge4010) flags.Add(3); // TimeStampInUTC
-		if (v is { Ge410: true, Lt643: true }) flags.Add(4); // IsUninstallerExe
-		if (v.Ge418) flags.Add(5); // CallInstructionOptimized
-		if (v is { Ge420: true, Lt643: true }) flags.Add(6); // Touch
-		if (v.Ge422) flags.Add(7); // ChunkEncrypted
-		if (v.Ge425) {
-			flags.Add(8); // ChunkCompressed
-		} else {
-			options |= 1UL << 8;
+		if (v.Lt643) {
+			flags.Add(1); // VersionInfoNotValid
 		}
 
-		if (v is { Ge5113: true, Lt643: true }) flags.Add(9); // SolidBreak
+		if (v is { Ge2017: true, Lt401: true }) {
+			flags.Add(2); // BZipped
+		}
+
+		if (v.Ge4010) {
+			flags.Add(3); // TimeStampInUTC
+		}
+
+		if (v is { Ge410: true, Lt643: true }) {
+			flags.Add(4); // IsUninstallerExe
+		}
+
+		if (v.Ge418) {
+			flags.Add(5); // CallInstructionOptimized
+		}
+
+		if (v is { Ge420: true, Lt643: true }) {
+			flags.Add(6); // Touch
+		}
+
+		if (v.Ge422) {
+			flags.Add(7); // ChunkEncrypted
+		}
+
+		if (v.Ge425) {
+			flags.Add(8); // ChunkCompressed
+		}
+
+		if (v is { Ge5113: true, Lt643: true }) {
+			flags.Add(9); // SolidBreak
+		}
+
 		if (v is { Ge557: true, Lt630: true }) {
 			flags.Add(10); // Sign
 			flags.Add(11); // SignOnce
@@ -141,11 +162,9 @@ public sealed class InnoDataEntry {
 			entry.Sign = InnoSignMode.Yes;
 		}
 
-		if ((entry.Options & InnoDataOptions.ChunkCompressed) != 0) {
-			entry.Compression = headerCompression;
-		} else {
-			entry.Compression = InnoCompressionMethod.Stored;
-		}
+		entry.Compression = (entry.Options & InnoDataOptions.ChunkCompressed) != 0
+			? headerCompression
+			: InnoCompressionMethod.Stored;
 
 		if ((entry.Options & InnoDataOptions.BZipped) != 0) {
 			entry.Compression = InnoCompressionMethod.BZip2;

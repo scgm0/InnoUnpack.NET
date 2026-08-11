@@ -249,8 +249,7 @@ static class InnoVersionParser {
 	///     返回版本表中下一个已知版本（用于渐进解析歧义版本）。
 	/// </summary>
 	public static InnoVersion? Next(InnoVersion version) {
-		for (var i = 0; i < KnownVersions.Length; i++) {
-			var (a, b, c, d, unicode, _, _) = KnownVersions[i];
+		foreach (var (a, b, c, d, unicode, _, _) in KnownVersions) {
 			if (CompareNumeric(a, b, c, d, version.Major, version.Minor, version.Patch, version.Revision) > 0
 				&& unicode == version.IsUnicode) {
 				return new InnoVersion(a, b, c, d, unicode, false, false, true);

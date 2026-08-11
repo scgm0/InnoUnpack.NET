@@ -59,9 +59,7 @@ sealed class InnoBinaryReader(Stream stream) {
 
 	/// <summary>跳过指定数量的字节。</summary>
 	public void Skip(long count) {
-		if (count < 0) {
-			throw new ArgumentOutOfRangeException(nameof(count));
-		}
+		ArgumentOutOfRangeException.ThrowIfNegative(count);
 
 		if (count == 0) {
 			return;
