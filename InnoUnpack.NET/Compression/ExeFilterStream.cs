@@ -1,5 +1,7 @@
 namespace InnoUnpack.NET.Compression;
 
+using System.Buffers;
+
 /// <summary>
 ///     反转 Inno Setup 的"调用指令优化"（Call Instruction Optimizer，4.1.8+ 默认启用）：
 ///     将存储的 x86 CALL/JMP 指令地址还原为相对偏移。
@@ -18,6 +20,9 @@ sealed class ExeFilterStream : Stream {
 	private readonly bool _isLegacy;
 	private int _addressBytesPending; // >0: 待输出；<0: 正在读取地址字节
 	private int _addressBytesRemaining;
+
+	/// <summary>向量化搜索 CALL/JMP 首字节（AVX2 搜索，替代逐字节标量判断）。</summary>
+	static private readonly SearchValues<byte> CallJmpTarget = SearchValues.Create([0xE8, 0xE9]);
 
 	// Blocked（5.2.0+）状态
 	private long _bytesRead;
@@ -64,7 +69,8 @@ sealed class ExeFilterStream : Stream {
 
 	public override int Read(Span<byte> buffer) { return _isLegacy ? ReadLegacy(buffer) : ReadBlocked(buffer); }
 
-	/// <summary>Legacy：逐字节还原，地址 = 存储值 - (指令偏移 + 5)。</summary>
+	/// <summary>Legacy：逐字节还原，地址 = 存储值 - (指令偏移 + 5)。
+	///     候选字节用 <see cref="SearchValues{T}" /> 向量化定位，候选间批量拷贝输出。</summary>
 	private int ReadLegacy(Span<byte> output) {
 		var written = 0;
 		while (written < output.Length) {
@@ -78,18 +84,35 @@ sealed class ExeFilterStream : Stream {
 				_inputBufferLen = n;
 			}
 
-			var value = _inputBuffer[_inputBufferPos++];
 			if (_addressBytesRemaining == 0) {
-				if (value is 0xE8 or 0xE9) {
-					_decodedAddress = unchecked((uint)-_fileOffset);
-					_addressBytesRemaining = 4;
+				var avail = _inputBufferLen - _inputBufferPos;
+				var segment = _inputBuffer.AsSpan(_inputBufferPos, Math.Min(avail, output.Length - written));
+				var index = segment.IndexOfAny(CallJmpTarget);
+				if (index < 0) {
+					// 无候选：整段复制
+					segment.CopyTo(output[written..]);
+					_inputBufferPos += segment.Length;
+					_fileOffset += segment.Length;
+					written += segment.Length;
+					continue;
 				}
-			} else {
-				_decodedAddress += value;
-				value = (byte)_decodedAddress;
-				_decodedAddress >>= 8;
-				_addressBytesRemaining--;
+
+				// 候选前的字节（含 E8/E9 本身）整段复制，随后进入地址解码
+				var prefix = index + 1;
+				_inputBuffer.AsSpan(_inputBufferPos, prefix).CopyTo(output[written..]);
+				_decodedAddress = unchecked((uint)-(_fileOffset + index));
+				_inputBufferPos += prefix;
+				_fileOffset += prefix;
+				written += prefix;
+				_addressBytesRemaining = 4;
+				continue;
 			}
+
+			var value = _inputBuffer[_inputBufferPos++];
+			_decodedAddress += value;
+			value = (byte)_decodedAddress;
+			_decodedAddress >>= 8;
+			_addressBytesRemaining--;
 
 			output[written++] = value;
 			_fileOffset++;
@@ -98,7 +121,8 @@ sealed class ExeFilterStream : Stream {
 		return written;
 	}
 
-	/// <summary>Blocked：仅还原高字节为 0x00/0xFF 的地址，不跨 64KB 块。</summary>
+	/// <summary>Blocked：仅还原高字节为 0x00/0xFF 的地址，不跨 64KB 块。
+	///     候选字节用 <see cref="SearchValues{T}" /> 向量化定位，候选间批量拷贝输出。</summary>
 	private int ReadBlocked(Span<byte> output) {
 		var written = 0;
 
@@ -123,22 +147,39 @@ sealed class ExeFilterStream : Stream {
 					_blockedBufferLen = n;
 				}
 
-				var b = _blockedBuffer[_blockedBufferPos++];
-				output[0] = b;
-				output = output[1..];
-				written++;
-				_bytesRead++;
-
-				if (b is not (0xE8 or 0xE9)) {
+				// 向量化扫描：定位下一候选字节，候选前整段复制
+				var avail = _blockedBufferLen - _blockedBufferPos;
+				var segment = _blockedBuffer.AsSpan(_blockedBufferPos, Math.Min(avail, output.Length));
+				var index = segment.IndexOfAny(CallJmpTarget);
+				if (index < 0) {
+					// 无候选：整段复制
+					segment.CopyTo(output);
+					output = output[segment.Length..];
+					written += segment.Length;
+					_bytesRead += segment.Length;
+					_blockedBufferPos += segment.Length;
 					continue;
 				}
 
-				// 指令跨越块边界时不优化
-				var positionInBlock = (_bytesRead - 1) % OptimizationBlockSize;
+				// 指令跨越块边界时不优化（候选位于 64KB 块尾部：按普通字节处理）
+				var positionInBlock = (_bytesRead + index) % OptimizationBlockSize;
 				if (OptimizationBlockSize - positionInBlock < InstructionSize) {
+					var n = index + 1;
+					_blockedBuffer.AsSpan(_blockedBufferPos, n).CopyTo(output);
+					output = output[n..];
+					written += n;
+					_bytesRead += n;
+					_blockedBufferPos += n;
 					continue;
 				}
 
+				// 候选有效：复制前缀（含 E8/E9 本身），进入地址读取
+				var prefix = index + 1;
+				_blockedBuffer.AsSpan(_blockedBufferPos, prefix).CopyTo(output);
+				output = output[prefix..];
+				written += prefix;
+				_bytesRead += prefix;
+				_blockedBufferPos += prefix;
 				_addressBytesPending = -4;
 			}
 

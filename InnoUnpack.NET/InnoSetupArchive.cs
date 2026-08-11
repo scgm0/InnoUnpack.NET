@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Security.Cryptography;
 using InnoUnpack.NET.Compression;
 using InnoUnpack.NET.Metadata;
 using InnoUnpack.NET.Reading;
@@ -26,6 +28,14 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	private readonly SliceReader _slices;
 	private readonly Stream _stream;
 
+	/// <summary>并行提取时每个 worker 的独立切片读取器工厂；null（流方式打开）时并行回退为串行。</summary>
+	private readonly Func<SliceReader>? _sliceReaderFactory;
+
+	// 池化的校验哈希（MD5/SHA1/SHA256）：跨文件复用，Verify 后经 GetHashAndReset 复位
+	private IncrementalHash? _hashPoolMd5;
+	private IncrementalHash? _hashPoolSha1;
+	private IncrementalHash? _hashPoolSha256;
+
 	private (int Count, ulong Size)? _fileStats;
 
 	private InnoSetupArchive(
@@ -34,13 +44,15 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		SliceReader slices,
 		InnoSetupInfo info,
 		InnoFilenameConverter converter,
-		InnoCrypto? crypto) {
+		InnoCrypto? crypto,
+		Func<SliceReader>? sliceReaderFactory) {
 		_stream = stream;
 		_leaveOpen = leaveOpen;
 		_slices = slices;
 		Info = info;
 		_converter = converter;
 		_crypto = crypto;
+		_sliceReaderFactory = sliceReaderFactory;
 	}
 
 	/// <summary>安装包元数据。</summary>
@@ -64,9 +76,34 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	}
 
 	public void Dispose() {
+		_hashPoolMd5?.Dispose();
+		_hashPoolSha1?.Dispose();
+		_hashPoolSha256?.Dispose();
 		_slices.Dispose();
 		if (!_leaveOpen) {
 			_stream.Dispose();
+		}
+	}
+
+	/// <summary>
+	///     创建文件校验器：MD5/SHA1/SHA256 复用池化实例（串行提取时；池非线程安全，
+	///     并行路径 <paramref name="usePool" /> 为 false 时每文件新建），
+	///     CRC32/Adler32 为轻量托管对象，每文件新建。
+	/// </summary>
+	private FileHasher? CreateFileHasher(InnoChecksumType type, bool usePool = true) {
+		if (!usePool) {
+			return FileHasher.Create(type);
+		}
+
+		switch (type) {
+			case InnoChecksumType.Md5:
+				return FileHasher.Create(type, _hashPoolMd5 ??= IncrementalHash.CreateHash(HashAlgorithmName.MD5));
+			case InnoChecksumType.Sha1:
+				return FileHasher.Create(type, _hashPoolSha1 ??= IncrementalHash.CreateHash(HashAlgorithmName.SHA1));
+			case InnoChecksumType.Sha256:
+				return FileHasher.Create(type, _hashPoolSha256 ??= IncrementalHash.CreateHash(HashAlgorithmName.SHA256));
+			default:
+				return FileHasher.Create(type);
 		}
 	}
 
@@ -160,9 +197,17 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		var info = InnoSetupInfo.Load(stream, options.ForceCodepage);
 
 		SliceReader slices;
+		Func<SliceReader>? sliceReaderFactory = null;
 		if (offsets.DataOffset != 0) {
 			// 单文件安装包：数据内嵌于 exe 中
 			slices = SliceReader.CreateEmbedded(stream, offsets.DataOffset);
+			if (installerPath is not null) {
+				// 并行 worker：独立打开文件句柄（独立 Position，可并发读）
+				var dataOffset = offsets.DataOffset;
+				sliceReaderFactory = () => SliceReader.CreateEmbeddedOwned(
+					new FileStream(installerPath, FileMode.Open, FileAccess.Read, FileShare.Read),
+					dataOffset);
+			}
 		} else {
 			// 多磁盘安装包：数据位于外部 setup-N.bin 切片中
 			if (installerPath is null) {
@@ -180,13 +225,15 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 			}
 
 			slices = SliceReader.CreateExternal(dir, basename, basename2, info.Header.SlicesPerDisk);
+			// 外部切片模式：每个 worker 独立打开切片文件
+			sliceReaderFactory = () => SliceReader.CreateExternal(dir, basename, basename2, info.Header.SlicesPerDisk);
 		}
 
 		var converter = new InnoFilenameConverter(options.PathMappings);
 
 		// 校验密码（错误会抛出 InnoFormatException），并建立解密上下文
 		var crypto = InnoCrypto.Create(info, options.Password);
-		return new(stream, leaveOpen, slices, info, converter, crypto);
+		return new(stream, leaveOpen, slices, info, converter, crypto, sliceReaderFactory);
 	}
 
 	/// <summary>异步打开安装包文件。</summary>
@@ -196,12 +243,14 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		string path,
 		InnoOpenOptions? options = null,
 		CancellationToken cancellationToken = default) {
+		// 读取链（切片→解密→解压）全部为同步 Read：异步 FileStream 在 Windows 上会令同步 Read
+		// 走 overlapped+等待（纯开销），此处不使用 FileOptions.Asynchronous
 		FileStream stream = new(path,
 			FileMode.Open,
 			FileAccess.Read,
 			FileShare.Read,
 			4096,
-			FileOptions.Asynchronous | FileOptions.SequentialScan);
+			FileOptions.SequentialScan);
 		try {
 			return await OpenAsync(stream, options, cancellationToken: cancellationToken).ConfigureAwait(false);
 		} catch {
@@ -365,36 +414,21 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 
 	/// <summary>
 	///     异步提取整个安装包到目录。
-	///     文件按 chunk 分组提取：同一 chunk 只解码一次（安装包通常为固体压缩，
-	///     全部文件共享一个 chunk，逐文件重开会导致数十倍冗余解码）。
-	///     写出顺序为 chunk/数据偏移顺序（与 innoextract 一致）。
-	///     文件数据写入使用异步 IO；解压与校验在调用线程上执行。
+	///     解压为 CPU 密集工作（LZMA range coder 串行位解码），无法以 I/O 方式真异步；
+	///     本方法将整个提取流程卸载到线程池执行（等价于 Task.Run(ExtractToDirectory)），
+	///     保证调用线程不被阻塞。取消令牌在逐文件与文件内读写块边界检查。
 	///     进度为绝对进度（当前字节数/文件数），总数可通过 <see cref="FileCount" /> 与
 	///     <see cref="TotalFileSize" /> 获取，由调用方自行计算百分比。
+	///     进度回调在线程池线程触发（<see cref="ExtractionOptions.MaxParallelism" /> &gt; 1 时可能多线程交错），
+	///     调用方需自行 marshal 到 UI 线程。
 	/// </summary>
 	/// <exception cref="InnoUnsupportedException">存在加密文件且未提供密码支持。</exception>
-	public async Task ExtractToDirectoryAsync(
+	public Task ExtractToDirectoryAsync(
 		string outputDirectory,
 		ExtractionOptions? options = null,
 		CancellationToken cancellationToken = default) {
 		ArgumentNullException.ThrowIfNull(outputDirectory);
-		options ??= new();
-		var outputRoot = Path.GetFullPath(outputDirectory);
-		Directory.CreateDirectory(outputRoot);
-
-		if (options.CreateDirectories) {
-			CreateDirectories(outputRoot);
-		}
-
-		List<InnoArchiveFile> files = [.. EnumerateFiles()];
-
-		var (extracted, filesExtracted) =
-			await ExtractByChunkAsync(files, outputRoot, options, cancellationToken).ConfigureAwait(false);
-		if (options.ApplyDirectoryAttributes) {
-			ApplyDirectoryAttributes(outputRoot);
-		}
-
-		options.RaiseProgressChanged(extracted, filesExtracted, null);
+		return Task.Run(() => ExtractToDirectory(outputDirectory, options, cancellationToken), cancellationToken);
 	}
 
 	/// <summary>
@@ -446,240 +480,206 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	}
 
 	/// <summary>
-	///     按 chunk 分组批量提取（同步）：同一 chunk 只打开/解码一次，
+	///     按 chunk 分组批量提取：同一 chunk 只打开/解码一次，
 	///     组内文件按数据偏移（<see cref="InnoDataEntry.FileOffset" />）顺序流式取出。
+	///     <see cref="ExtractionOptions.MaxParallelism" /> &gt; 1 且安装包经文件路径打开时，
+	///     独立 chunk 组并行处理（固体包仅一组，不受影响）；组间完成顺序不定，进度事件可能交错。
 	/// </summary>
 	internal (ulong Extracted, int FilesExtracted) ExtractByChunk(
 		List<InnoArchiveFile> files,
 		string outputRoot,
 		ExtractionOptions options,
 		CancellationToken cancellationToken = default) {
-		ulong extracted = 0;
-		var filesExtracted = 0;
-
-		foreach (var group in GroupFilesByChunk(files)) {
-			var chunkFiles = group.Value;
-			var chunk = ChunkReader.Open(_slices, chunkFiles[0].DataEntry, _crypto);
-			var chunkStream = chunk.Stream;
-			long chunkPos = 0;
-			// 提取缓冲：整个 chunk 批次复用一份（解压+写盘共用），避免每文件分配
-			var buffer = new byte[81920];
-			try {
-				foreach (var file in chunkFiles) {
-					cancellationToken.ThrowIfCancellationRequested();
-
-					if (options.FileFilter is not null && !options.FileFilter(file)) {
-						continue; // 过滤掉的文件不参与进度（总数用 EnumerateFiles(filter) 计算，保持一致）
-					}
-
-					if (ShouldSkipTemporary(file, options)) {
-						filesExtracted++;
-						ReportProgress(options, extracted, filesExtracted, file.Path);
-						continue;
-					}
-
-					var target = ResolveOutputPath(outputRoot, file.Path);
-					if (target is not null && options.OutputPathMapper is not null) {
-						var mapped = options.OutputPathMapper(file);
-						if (!string.IsNullOrEmpty(mapped)) {
-							// 映射路径同样需通过安全校验，不安全时回退默认路径
-							target = ResolveOutputPath(outputRoot, mapped) ?? target;
-						}
-					}
-
-					if (target is null) {
-						filesExtracted++; // 不安全路径，跳过
-						ReportProgress(options, extracted, filesExtracted, file.Path);
-						continue;
-					}
-
-					EnsureParentDirectory(target);
-
-					if (File.Exists(target) && !options.Overwrite) {
-						extracted += file.Size;
-						filesExtracted++;
-						ReportProgress(options, extracted, filesExtracted, file.Path);
-						continue;
-					}
-
-					// 定位到文件数据起点：组内偏移递增，只需前跳
-					var fileOffset = (long)file.DataEntry.FileOffset;
-					if (fileOffset < chunkPos) {
-						// 防御：偏移回退（如同一数据被多个文件条目引用），重新打开 chunk
-						chunk.Dispose();
-						chunk = ChunkReader.Open(_slices, file.DataEntry, _crypto);
-						chunkStream = chunk.Stream;
-						chunkPos = 0;
-					}
-
-					if (fileOffset > chunkPos) {
-						SkipBytes(chunkStream, fileOffset - chunkPos);
-						chunkPos = fileOffset;
-					}
-
-					using (var source = CreateFileSource(chunkStream, file))
-					using (var output = File.OpenHandle(target,
-						FileMode.Create,
-						FileAccess.Write,
-						FileShare.None,
-						FileOptions.SequentialScan)) {
-						var remaining = (long)file.Size;
-						long writeOffset = 0;
-						using var hasher = options.VerifyChecksums
-							? FileHasher.Create(file.DataEntry.Checksum.Type)
-							: null;
-						while (remaining > 0) {
-							cancellationToken.ThrowIfCancellationRequested();
-							var toRead = (int)Math.Min(buffer.Length, remaining);
-							var n = source.Read(buffer, 0, toRead);
-							if (n <= 0) {
-								throw new InnoFormatException($"文件数据不完整：{file.Path}");
-							}
-
-							// 直接 OS 写入（无 FileStream 内部缓冲分配）
-							RandomAccess.Write(output, buffer.AsSpan(0, n), writeOffset);
-							writeOffset += n;
-							hasher?.Update(buffer.AsSpan(0, n));
-							remaining -= n;
-							extracted += (ulong)n;
-							ReportProgress(options, extracted, filesExtracted, file.Path);
-						}
-
-						if (hasher is not null && !hasher.Verify(file.DataEntry.Checksum)) {
-							throw new InnoFormatException($"文件校验和不匹配（数据可能已损坏）：{file.Path}");
-						}
-					}
-
-					chunkPos += (long)file.Size;
-					filesExtracted++;
-					ReportProgress(options, extracted, filesExtracted, file.Path);
-					SetTimestamp(target, file.Timestamp, options);
-				}
-			} finally {
-				chunk.Dispose();
-			}
-		}
-
-		return (extracted, filesExtracted);
+		return ExtractByChunkGroups(GroupFilesByChunk(files), outputRoot, options, cancellationToken);
 	}
 
 	/// <summary>
-	///     按 chunk 分组批量提取（异步）：同一 chunk 只打开/解码一次，
-	///     组内文件按数据偏移（<see cref="InnoDataEntry.FileOffset" />）顺序流式取出。
+	///     按给定 chunk 分组批量提取（<see cref="ExtractByChunk" /> 的内部调度入口，
+	///     亦供测试以人工分组触发并行路径）。
+	///     <see cref="ExtractionOptions.MaxParallelism" /> &gt; 1 且安装包经文件路径打开时，
+	///     独立 chunk 组并行处理（固体包仅一组，不受影响）；组间完成顺序不定，进度事件可能交错。
 	/// </summary>
-	internal async Task<(ulong Extracted, int FilesExtracted)> ExtractByChunkAsync(
-		List<InnoArchiveFile> files,
+	internal (ulong Extracted, int FilesExtracted) ExtractByChunkGroups(
+		IReadOnlyList<KeyValuePair<(uint FirstSlice, ulong Offset), List<InnoArchiveFile>>> groups,
 		string outputRoot,
 		ExtractionOptions options,
-		CancellationToken cancellationToken) {
-		ulong extracted = 0;
-		var filesExtracted = 0;
-
-		foreach (var group in GroupFilesByChunk(files)) {
-			var chunkFiles = group.Value;
-			var chunk = ChunkReader.Open(_slices, chunkFiles[0].DataEntry, _crypto);
-			var chunkStream = chunk.Stream;
-			long chunkPos = 0;
-			// 提取缓冲：整个 chunk 批次复用一份（解压+写盘共用），避免每文件分配
-			var buffer = new byte[81920];
-			try {
-				foreach (var file in chunkFiles) {
-					cancellationToken.ThrowIfCancellationRequested();
-
-					if (options.FileFilter is not null && !options.FileFilter(file)) {
-						continue; // 过滤掉的文件不参与进度（总数用 EnumerateFiles(filter) 计算，保持一致）
-					}
-
-					if (ShouldSkipTemporary(file, options)) {
-						filesExtracted++;
-						ReportProgress(options, extracted, filesExtracted, file.Path);
-						continue;
-					}
-
-					var target = ResolveOutputPath(outputRoot, file.Path);
-					if (target is not null && options.OutputPathMapper is not null) {
-						var mapped = options.OutputPathMapper(file);
-						if (!string.IsNullOrEmpty(mapped)) {
-							// 映射路径同样需通过安全校验，不安全时回退默认路径
-							target = ResolveOutputPath(outputRoot, mapped) ?? target;
-						}
-					}
-
-					if (target is null) {
-						filesExtracted++; // 不安全路径，跳过
-						ReportProgress(options, extracted, filesExtracted, file.Path);
-						continue;
-					}
-
-					EnsureParentDirectory(target);
-
-					if (File.Exists(target) && !options.Overwrite) {
-						extracted += file.Size;
-						filesExtracted++;
-						ReportProgress(options, extracted, filesExtracted, file.Path);
-						continue;
-					}
-
-					// 定位到文件数据起点：组内偏移递增，只需前跳
-					var fileOffset = (long)file.DataEntry.FileOffset;
-					if (fileOffset < chunkPos) {
-						// 防御：偏移回退（如同一数据被多个文件条目引用），重新打开 chunk
-						chunk.Dispose();
-						chunk = ChunkReader.Open(_slices, file.DataEntry, _crypto);
-						chunkStream = chunk.Stream;
-						chunkPos = 0;
-					}
-
-					if (fileOffset > chunkPos) {
-						SkipBytes(chunkStream, fileOffset - chunkPos);
-						chunkPos = fileOffset;
-					}
-
-					await using (var source = CreateFileSource(chunkStream, file))
-					using (var output = File.OpenHandle(target,
-						FileMode.Create,
-						FileAccess.Write,
-						FileShare.None,
-						FileOptions.Asynchronous | FileOptions.SequentialScan)) {
-						var remaining = (long)file.Size;
-						long writeOffset = 0;
-						using var hasher = options.VerifyChecksums
-							? FileHasher.Create(file.DataEntry.Checksum.Type)
-							: null;
-						while (remaining > 0) {
-							cancellationToken.ThrowIfCancellationRequested();
-							var toRead = (int)Math.Min(buffer.Length, remaining);
-							var n = await source.ReadAsync(buffer.AsMemory(0, toRead), cancellationToken).ConfigureAwait(false);
-							if (n <= 0) {
-								throw new InnoFormatException($"文件数据不完整：{file.Path}");
-							}
-
-							// 直接 OS 异步写入（无 FileStream 内部缓冲分配）
-							await RandomAccess.WriteAsync(output, buffer.AsMemory(0, n), writeOffset, cancellationToken)
-								.ConfigureAwait(false);
-							writeOffset += n;
-							hasher?.Update(buffer.AsSpan(0, n));
-							remaining -= n;
-							extracted += (ulong)n;
-							ReportProgress(options, extracted, filesExtracted, file.Path);
-						}
-
-						if (hasher is not null && !hasher.Verify(file.DataEntry.Checksum)) {
-							throw new InnoFormatException($"文件校验和不匹配（数据可能已损坏）：{file.Path}");
-						}
-					}
-
-					chunkPos += (long)file.Size;
-					filesExtracted++;
-					ReportProgress(options, extracted, filesExtracted, file.Path);
-					SetTimestamp(target, file.Timestamp, options);
-				}
-			} finally {
-				chunk.Dispose();
+		CancellationToken cancellationToken = default) {
+		var parallelism = options.MaxParallelism;
+		if (parallelism <= 1 || groups.Count <= 1 || _sliceReaderFactory is null) {
+			// 串行路径（默认）：逐组顺序提取
+			long extracted = 0;
+			var filesExtracted = 0;
+			foreach (var group in groups) {
+				ExtractChunkGroup(group.Value,
+					outputRoot,
+					options,
+					cancellationToken,
+					_slices,
+					parallel: false,
+					ref extracted,
+					ref filesExtracted);
 			}
+
+			return ((ulong)extracted, filesExtracted);
 		}
 
-		return (extracted, filesExtracted);
+		// 并行路径：独立 chunk 组并发解码（每 worker 独立切片读取器与解码器）
+		long totalBytes = 0;
+		var totalFiles = 0;
+		Parallel.ForEachAsync(groups, new ParallelOptions {
+			MaxDegreeOfParallelism = parallelism,
+			CancellationToken = cancellationToken
+		}, (group, token) => {
+			var workerSlices = _sliceReaderFactory!();
+			try {
+				ExtractChunkGroup(group.Value,
+					outputRoot,
+					options,
+					token,
+					workerSlices,
+					parallel: true,
+					ref totalBytes,
+					ref totalFiles);
+			} finally {
+				workerSlices.Dispose();
+			}
+
+			return ValueTask.CompletedTask;
+		}).GetAwaiter().GetResult();
+
+		return ((ulong)totalBytes, totalFiles);
+	}
+
+	/// <summary>提取单个 chunk 组内的全部文件（组内顺序与数据偏移一致）。</summary>
+	/// <param name="parallel">并行模式：进度累计使用原子操作（组间交错报告，绝对累计值精确）。</param>
+	private void ExtractChunkGroup(
+		List<InnoArchiveFile> chunkFiles,
+		string outputRoot,
+		ExtractionOptions options,
+		CancellationToken cancellationToken,
+		SliceReader slices,
+		bool parallel,
+		ref long extracted,
+		ref int filesExtracted) {
+		var chunk = ChunkReader.Open(slices, chunkFiles[0].DataEntry, _crypto);
+		var chunkStream = chunk.Stream;
+		long chunkPos = 0;
+		// 提取缓冲：整个 chunk 批次复用一份（解压+写盘共用），ArrayPool 租用避免每批次分配
+		var buffer = ArrayPool<byte>.Shared.Rent(256 * 1024);
+		try {
+			foreach (var file in chunkFiles) {
+				cancellationToken.ThrowIfCancellationRequested();
+
+				if (options.FileFilter is not null && !options.FileFilter(file)) {
+					continue; // 过滤掉的文件不参与进度（总数用 EnumerateFiles(filter) 计算，保持一致）
+				}
+
+				if (ShouldSkipTemporary(file, options)) {
+					AddProgress(options, parallel, ref extracted, ref filesExtracted, 0, 1, file.Path);
+					continue;
+				}
+
+				var target = ResolveOutputPath(outputRoot, file.Path);
+				if (target is not null && options.OutputPathMapper is not null) {
+					var mapped = options.OutputPathMapper(file);
+					if (!string.IsNullOrEmpty(mapped)) {
+						// 映射路径同样需通过安全校验，不安全时回退默认路径
+						target = ResolveOutputPath(outputRoot, mapped) ?? target;
+					}
+				}
+
+				if (target is null) {
+					AddProgress(options, parallel, ref extracted, ref filesExtracted, 0, 1, file.Path); // 不安全路径，跳过
+					continue;
+				}
+
+				EnsureParentDirectory(target);
+
+				if (File.Exists(target) && !options.Overwrite) {
+					AddProgress(options, parallel, ref extracted, ref filesExtracted, (long)file.Size, 1, file.Path);
+					continue;
+				}
+
+				// 定位到文件数据起点：组内偏移递增，只需前跳
+				var fileOffset = (long)file.DataEntry.FileOffset;
+				if (fileOffset < chunkPos) {
+					// 防御：偏移回退（如同一数据被多个文件条目引用），重新打开 chunk
+					chunk.Dispose();
+					chunk = ChunkReader.Open(slices, file.DataEntry, _crypto);
+					chunkStream = chunk.Stream;
+					chunkPos = 0;
+				}
+
+				if (fileOffset > chunkPos) {
+					SkipBytes(chunkStream, fileOffset - chunkPos);
+					chunkPos = fileOffset;
+				}
+
+				using (var source = CreateFileSource(chunkStream, file))
+				using (var output = File.OpenHandle(target,
+					FileMode.Create,
+					FileAccess.Write,
+					FileShare.None,
+					FileOptions.SequentialScan)) {
+					var remaining = (long)file.Size;
+					long writeOffset = 0;
+					// 校验哈希池非线程安全：并行路径每文件新建（usePool = !parallel）
+					using var hasher = options.VerifyChecksums
+						? CreateFileHasher(file.DataEntry.Checksum.Type, !parallel)
+						: null;
+					while (remaining > 0) {
+						cancellationToken.ThrowIfCancellationRequested();
+						var toRead = (int)Math.Min(buffer.Length, remaining);
+						var n = source.Read(buffer, 0, toRead);
+						if (n <= 0) {
+							throw new InnoFormatException($"文件数据不完整：{file.Path}");
+						}
+
+						// 直接 OS 写入（无 FileStream 内部缓冲分配）
+						RandomAccess.Write(output, buffer.AsSpan(0, n), writeOffset);
+						writeOffset += n;
+						hasher?.Update(buffer.AsSpan(0, n));
+						remaining -= n;
+						AddProgress(options, parallel, ref extracted, ref filesExtracted, n, 0, file.Path);
+					}
+
+					if (hasher is not null && !hasher.Verify(file.DataEntry.Checksum)) {
+						throw new InnoFormatException($"文件校验和不匹配（数据可能已损坏）：{file.Path}");
+					}
+				}
+
+				chunkPos += (long)file.Size;
+				AddProgress(options, parallel, ref extracted, ref filesExtracted, 0, 1, file.Path);
+				SetTimestamp(target, file.Timestamp, options);
+			}
+		} finally {
+			ArrayPool<byte>.Shared.Return(buffer);
+			chunk.Dispose();
+		}
+	}
+
+	/// <summary>累计进度并触发事件（并行时原子累计，绝对累计值保证精确）。</summary>
+	static private void AddProgress(
+		ExtractionOptions options,
+		bool parallel,
+		ref long extracted,
+		ref int filesExtracted,
+		long bytesDelta,
+		int filesDelta,
+		string? currentFile) {
+		long bytes;
+		int files;
+		if (parallel) {
+			bytes = Interlocked.Add(ref extracted, bytesDelta);
+			files = Interlocked.Add(ref filesExtracted, filesDelta);
+		} else {
+			extracted += bytesDelta;
+			filesExtracted += filesDelta;
+			bytes = extracted;
+			files = filesExtracted;
+		}
+
+		options.RaiseProgressChanged((ulong)bytes, files, currentFile);
 	}
 
 	static private bool ShouldSkipTemporary(InnoArchiveFile file, ExtractionOptions options) =>
@@ -701,10 +701,6 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		} catch (IOException) {
 			// 忽略时间戳设置失败（如权限或文件系统限制）
 		} catch (UnauthorizedAccessException) { }
-	}
-
-	static private void ReportProgress(ExtractionOptions options, ulong extracted, int filesExtracted, string? currentFile) {
-		options.RaiseProgressChanged(extracted, filesExtracted, currentFile);
 	}
 
 	private void CreateDirectories(string outputRoot) {
@@ -796,14 +792,18 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	}
 
 	static private void SkipBytes(Stream stream, long count) {
-		var buffer = new byte[81920];
-		while (count > 0) {
-			var n = stream.Read(buffer, 0, (int)Math.Min(buffer.Length, count));
-			if (n <= 0) {
-				throw new InnoFormatException("chunk 数据不完整，无法跳过");
-			}
+		var buffer = ArrayPool<byte>.Shared.Rent(81920);
+		try {
+			while (count > 0) {
+				var n = stream.Read(buffer, 0, (int)Math.Min(buffer.Length, count));
+				if (n <= 0) {
+					throw new InnoFormatException("chunk 数据不完整，无法跳过");
+				}
 
-			count -= n;
+				count -= n;
+			}
+		} finally {
+			ArrayPool<byte>.Shared.Return(buffer);
 		}
 	}
 

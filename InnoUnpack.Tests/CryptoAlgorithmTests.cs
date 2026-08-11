@@ -82,6 +82,34 @@ public class CryptoAlgorithmTests {
 	}
 
 	[Fact]
+	public void XChaCha20RoundTripsAcrossMultipleKeystreamBlocks() {
+		// 数据超过 256 字节（4 块 SIMD keystream 的整批大小），覆盖多次 keystream 生成、
+		// counter 推进与缓冲轮转；小读取粒度强制跨块边界消费
+		var key = Convert.FromHexString(
+			"000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F");
+		var nonce = Convert.FromHexString(
+			"202122232425262728292A2B2C2D2E2F3031323334353637");
+		var data = Enumerable.Range(0, 2000).Select(i => (byte)(i * 31 + 7)).ToArray();
+
+		var encrypted = new byte[data.Length];
+		using (XChaCha20Stream enc = new(new MemoryStream(data), key, nonce)) {
+			enc.ReadExactly(encrypted);
+		}
+
+		using XChaCha20Stream dec = new(new MemoryStream(encrypted), key, nonce);
+		var decrypted = new byte[data.Length];
+		// 用 7 字节小步长读取，强制多次跨越 keystream 块边界
+		var offset = 0;
+		while (offset < decrypted.Length) {
+			var n = Math.Min(7, decrypted.Length - offset);
+			dec.ReadExactly(decrypted.AsSpan(offset, n));
+			offset += n;
+		}
+
+		Assert.Equal(data, decrypted);
+	}
+
+	[Fact]
 	public void Arc4Md5ChunkDecryptorRoundTrips() {
 		// 模拟 Inno Setup 加密 chunk：key = MD5(chunk_salt + password)，ARC4 流加密
 		byte[] salt = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];

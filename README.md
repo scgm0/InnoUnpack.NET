@@ -18,7 +18,7 @@
 - 目录权限与属性应用（POSIX 权限 / Windows 文件属性，`ApplyDirectoryAttributes`，默认关闭）
 - 逐文件提取过滤与输出路径映射（`FileFilter` / `OutputPathMapper`）
 - 提取取消（同步/异步均支持 `CancellationToken`）
-- **并行提取多个安装包**：各 archive 实例相互独立、无共享可变状态，可直接多线程并行
+- **并行提取**：多个 archive 实例可并发；单包内 `ExtractionOptions.MaxParallelism` 并行独立 chunk 组（仅对非固体安装包有收益，经文件路径打开时生效）
 - 文件校验和验证（MD5 / SHA1 / SHA256 / CRC32 / Adler32）
 - 异步 API（`OpenAsync` / `ExtractToDirectoryAsync` / `IAsyncDisposable`）
 - 基于 **文件数**与 **字节数**的进度报告（绝对进度，百分比由调用方计算）
@@ -187,21 +187,18 @@ Inno Setup 官方安装器（innoextract 1.9
 热路径下 AOT-Speed 与 JIT 持平，Default/Size 约慢 30% 左右（JIT 分层编译对热点循环生成更好的代码）。
 原生二进制约 3 MB，无运行时依赖。
 
-### 本库全量提取（公共 API 默认选项，含 SHA256 校验，best-of-3）
-
-| fixture                              | 大小     | JIT     | AOT-Speed |
-|--------------------------------------|----------|---------|-----------|
-| isetup-4.2.7.exe（LZMA1）            | 3.0 MiB  | 100 ms  | 95 ms     |
-| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB  | 128 ms  | 122 ms    |
-| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB  | 125 ms  | 117 ms    |
-| innosetup-6.7.3.exe（LZMA2）         | 27.6 MiB | 634 ms  | 633 ms    |
-| innosetup-7.0.2-x64.exe（LZMA2）     | 49.0 MiB | 1052 ms | 1110 ms   |
-
 ### 内存
 
 - 解码器字典/概率表/输入输出缓冲全部经 `ArrayPool` 租用并在流销毁时归还： **大缓冲零分配、
-  提取全程 GC 零收集**（gc0/gc1/gc2 均为 0 次）；池预热后单次提取仅 0.4–0.6 MiB 小对象分配
+  提取全程 GC 零收集**（gc0/gc1/gc2 均为 0 次）；池预热后单次提取仅 0.23–0.55 MiB 小对象分配
+- bzip2 块输出直接手交解码器缓冲（消除每块最大 900KB 的 LOH 复制）；提取泵（256KB）、
+  `SkipBytes` 跳跃缓冲全部池化；MD5/SHA1/SHA256 校验哈希跨文件复用（`GetHashAndReset`）
 - 文件写出使用 `RandomAccess` 直接 OS 写入，无 FileStream 内部缓冲分配
+
+### 异步语义
+
+`ExtractToDirectoryAsync` 将整个提取流程卸载到线程池执行（等价于 `Task.Run(ExtractToDirectory)`），
+调用线程不被阻塞；解压为 CPU 密集工作，进度回调在线程池线程触发（UI 调用方需自行 marshal）。
 
 ### 复现
 
@@ -210,6 +207,8 @@ Inno Setup 官方安装器（innoextract 1.9
 bash tools/bench/compare.sh <fixtures-dir>   # 自动发布 AOT×3 并输出全部对比表
 dotnet run --project tools/bench -c Release -- <fixtures-dir> gc      # 冷进程分配/GC
 dotnet run --project tools/bench -c Release -- <fixtures-dir> gcwarm  # 池预热后分配/GC
+dotnet run --project tools/bench -c Release -- crypto <size-mb>       # XChaCha20 解密吞吐（SIMD 门禁）
+dotnet run --project tools/bench -c Release -- parallel <fixtures-dir> # 独立 chunk 并行解码门禁（串行 vs 并发）
 ```
 
 Windows 对应版本（PowerShell 5.1+/7 均可）：

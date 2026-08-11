@@ -99,9 +99,6 @@ sealed class Lzma1Decoder {
 	private uint _rep0, _rep1, _rep2, _rep3;
 	private int _state;
 
-	/// <summary>当前 DecodeReal 迭代（符号）开始时的字典位置（输入不足时仅回滚到此处）。</summary>
-	private int _symbolDicStart;
-
 	/// <summary>以 5 字节属性头（lc/lp/pb + 字典大小）初始化。</summary>
 	public Lzma1Decoder(byte[] props) {
 		if (props.Length < 5) {
@@ -458,19 +455,16 @@ sealed class Lzma1Decoder {
 			bufLimit = _inPos + (_inLen - _inPos - RequiredInputMax);
 		}
 
-		_symbolDicStart = dicStart;
 		try {
 			DecodeReal(limit, bufLimit);
 		} catch (InputEofException) {
-			// 输入不足导致符号未完成：仅丢弃该符号（与 liblzma 的 LZMA_BUF_ERROR 行为一致）
+			// 输入不足导致符号未完成：仅丢弃该符号（DecodeReal 已回滚 _dicPos，与 liblzma 的 LZMA_BUF_ERROR 行为一致）
 			_inPos = startPos;
-			_dicPos = _symbolDicStart;
 			return false;
 		} catch (InnoFormatException) when (expectedDummy >= 0) {
 			// 输入不足路径下预览与实际解码不一致（如位不完整导致的错误匹配距离）：
-			// 丢弃未完成符号，与 liblzma 在截断码流末尾的行为一致
+			// 丢弃未完成符号（DecodeReal 已回滚 _dicPos），与 liblzma 在截断码流末尾的行为一致
 			_inPos = startPos;
-			_dicPos = _symbolDicStart;
 			return false;
 		}
 
@@ -795,6 +789,7 @@ sealed class Lzma1Decoder {
 	///     主解码循环（对应 LzmaDec_DecodeReal）。
 	///     热路径使用 <see cref="Unsafe.Add{T}(ref T, int)" /> 直接寻址数组元素，消除逐位边界检查；
 	///     索引不变式由距离上限检查（≤ 字典容量）与环回运算保证，与原生 liblzma 的裸指针行为一致。
+	///     符号起点保存在局部变量（仅异常回滚时回写字典位置），避免每符号字段写入。
 	/// </summary>
 	private void DecodeReal(int limit, int bufLimit) {
 		int lc = _lc;
@@ -820,8 +815,10 @@ sealed class Lzma1Decoder {
 		// 上一已写入字节：字面/匹配写入后本地跟踪，避免每个字面量重复从字典读取
 		var prevByte = (uint)Unsafe.Add(ref dic, (_dicPos == 0 ? dicBufSize : _dicPos) - 1);
 
-		do {
-			_symbolDicStart = _dicPos;
+		var symbolDicStart = _dicPos;
+		try {
+			do {
+				symbolDicStart = _dicPos;
 			var posState = (processedPos & pbMask) << 4;
 			var probIndex = KStartOffset + IsMatch + (int)(posState + (uint)state);
 			if (DecodeBit(ref Unsafe.Add(ref probs, probIndex), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen) ==
@@ -1144,6 +1141,10 @@ sealed class Lzma1Decoder {
 					if (rep0 >= (uint)curLen) {
 						// 区域不重叠：memmove 语义整段复制
 						Array.Copy(_dic, pos, _dic, dest, curLen);
+					} else if (rep0 == 1) {
+						// 距离 1：单字节重复（LZ77 传播语义 = 填充），SIMD 填充替代倍增复制
+						var b = Unsafe.Add(ref dic, pos);
+						_dic.AsSpan(dest, curLen).Fill(b);
 					} else {
 						// 重叠：先复制 rep0 字节的种子，再倍增复制覆盖剩余
 						Array.Copy(_dic, pos, _dic, dest, (int)rep0);
@@ -1173,6 +1174,23 @@ sealed class Lzma1Decoder {
 			Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 		}
 
+		// 与参考实现一致：匹配超出字典属于格式错误，抛出前写回字段（含 _remainLen ≥ ErrorData，
+		// 令后续调用以 EOF 终止流）；此处置于 try 内以统一回滚 _dicPos 到符号起点
+		if (len >= KMatchSpecLenErrorData) {
+			_remainLen = KMatchSpecLenErrorData;
+			throw new InnoFormatException("LZMA 数据错误（匹配超出字典）");
+		}
+		} catch (InputEofException) {
+			// 符号未完成：回滚到符号起点（与 liblzma 的 LZMA_BUF_ERROR 行为一致）
+			_dicPos = symbolDicStart;
+			throw;
+		} catch (InnoFormatException) {
+			// 格式错误（匹配超出字典）：回滚未完成符号后传播；_remainLen 已置 ErrorData，
+			// 与参考实现的"字段写回后回滚"在后续调用上行为一致（EOF 终止）
+			_dicPos = symbolDicStart;
+			throw;
+		}
+
 		_inPos = buf;
 		_range = range;
 		_code = code;
@@ -1184,9 +1202,6 @@ sealed class Lzma1Decoder {
 		_rep2 = rep2;
 		_rep3 = rep3;
 		_state = state;
-		if (len >= KMatchSpecLenErrorData) {
-			throw new InnoFormatException("LZMA 数据错误（匹配超出字典）");
-		}
 	}
 
 	/// <summary>REV_BIT_CONST：反转解码一位（m 为 1/2/4）。</summary>

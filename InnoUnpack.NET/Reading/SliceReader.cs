@@ -15,17 +15,19 @@ sealed class SliceReader : IDisposable {
 	private readonly Stream? _embedded;
 	private readonly string? _sliceDirectory;
 	private readonly int _slicesPerDisk;
+	private readonly bool _ownsEmbedded;
 	private uint _currentSlice = uint.MaxValue;
 
 	private FileStream? _sliceFile;
 	private ulong _sliceSize;
 
-	private SliceReader(Stream embedded, ulong dataOffset) {
+	private SliceReader(Stream embedded, ulong dataOffset, bool ownsEmbedded) {
 		_embedded = embedded;
 		_dataOffset = dataOffset;
 		_baseFilename = string.Empty;
 		_baseFilename2 = string.Empty;
 		_slicesPerDisk = 1;
+		_ownsEmbedded = ownsEmbedded;
 	}
 
 	private SliceReader(string sliceDirectory, string baseFilename, string baseFilename2, int slicesPerDisk) {
@@ -42,10 +44,21 @@ sealed class SliceReader : IDisposable {
 
 	private Stream CurrentStream => _embedded ?? _sliceFile!;
 
-	public void Dispose() { CloseSliceFile(); }
+	public void Dispose() {
+		CloseSliceFile();
+		if (_ownsEmbedded) {
+			_embedded?.Dispose();
+		}
+	}
 
 	/// <summary>创建单文件模式读取器（setup 数据内嵌于安装包中）。</summary>
-	public static SliceReader CreateEmbedded(Stream stream, ulong dataOffset) { return new(stream, dataOffset); }
+	public static SliceReader CreateEmbedded(Stream stream, ulong dataOffset) { return new(stream, dataOffset, false); }
+
+	/// <summary>
+	///     创建持有内嵌流所有权的单文件模式读取器（并行提取时每个 worker 独立打开文件句柄，
+	///     Dispose 时关闭该流）。
+	/// </summary>
+	public static SliceReader CreateEmbeddedOwned(Stream stream, ulong dataOffset) { return new(stream, dataOffset, true); }
 
 	/// <summary>创建外部切片模式读取器（多磁盘安装包）。</summary>
 	public static SliceReader CreateExternal(

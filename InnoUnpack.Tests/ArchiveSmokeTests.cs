@@ -457,4 +457,85 @@ public class ArchiveSmokeTests {
 			}
 		}
 	}
+
+	/// <summary>
+	///     并行 chunk 组提取差分：把单个固体 chunk 的文件人工拆成两个同键分组
+	///     （等价于非固体安装包的独立 chunk 组），MaxParallelism=2 并行提取，
+	///     输出与串行全量提取逐字节一致（覆盖 worker 独立切片读取器、并发 chunk 打开、
+	///     原子进度累计与并行校验路径）。
+	/// </summary>
+	[Theory]
+	[InlineData("isetup-4.2.7.exe")]
+	[InlineData("innosetup-5.6.1-unicode.exe")]
+	[InlineData("innosetup-6.7.3.exe")]
+	public void ParallelChunkGroupsProduceIdenticalOutput(string fixture) {
+		Fixtures.SkipIfMissing(fixture);
+
+		using var archive = InnoSetupArchive.Open(Fixtures.Get(fixture));
+		var sorted = archive.EnumerateFiles()
+			.Where(f => f.Entry.Location >= 0)
+			.OrderBy(f => f.DataEntry.FileOffset)
+			.ToList();
+		Assert.True(sorted.Count >= 4, "样本文件过少");
+
+		var groupA = new List<InnoArchiveFile>();
+		var groupB = new List<InnoArchiveFile>();
+		for (var i = 0; i < sorted.Count; i++) {
+			(i % 2 == 0 ? groupA : groupB).Add(sorted[i]);
+		}
+
+		var key = ((uint)0, (ulong)0);
+		if (sorted.Count > 0) {
+			key = (sorted[0].DataEntry.FirstSlice, sorted[0].DataEntry.Offset);
+		}
+
+		List<KeyValuePair<(uint FirstSlice, ulong Offset), List<InnoArchiveFile>>> groups = [
+			new(key, groupA),
+			new(key, groupB)
+		];
+
+		var root = Path.Combine(Path.GetTempPath(), "innounpack-tests", "parallel-groups-" + fixture[..^4]);
+		var outSerial = Path.Combine(root, "serial");
+		var outParallel = Path.Combine(root, "parallel");
+		if (Directory.Exists(root)) {
+			Directory.Delete(root, true);
+		}
+
+		try {
+			var opts = new ExtractionOptions { VerifyChecksums = true, PreserveTimestamps = false };
+			archive.ExtractToDirectory(outSerial, opts);
+
+			var parallelOpts = new ExtractionOptions {
+				VerifyChecksums = true,
+				PreserveTimestamps = false,
+				MaxParallelism = 2
+			};
+			archive.ExtractByChunkGroups(groups, outParallel, parallelOpts);
+
+			AssertDirectoriesEqual(outSerial, outParallel);
+		} finally {
+			if (Directory.Exists(root)) {
+				Directory.Delete(root, true);
+			}
+		}
+	}
+
+	/// <summary>递归比对两个目录：相对路径集合与文件内容逐字节一致。</summary>
+	static private void AssertDirectoriesEqual(string expectedDir, string actualDir) {
+		var expected = Directory.EnumerateFiles(expectedDir, "*", SearchOption.AllDirectories)
+			.Select(f => Path.GetRelativePath(expectedDir, f))
+			.OrderBy(p => p)
+			.ToList();
+		var actual = Directory.EnumerateFiles(actualDir, "*", SearchOption.AllDirectories)
+			.Select(f => Path.GetRelativePath(actualDir, f))
+			.OrderBy(p => p)
+			.ToList();
+		Assert.Equal(expected, actual);
+
+		foreach (var relative in expected) {
+			var a = File.ReadAllBytes(Path.Combine(expectedDir, relative));
+			var b = File.ReadAllBytes(Path.Combine(actualDir, relative));
+			Assert.True(a.AsSpan().SequenceEqual(b), $"文件内容不一致：{relative}");
+		}
+	}
 }

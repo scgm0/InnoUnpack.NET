@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using InnoUnpack.NET;
+using InnoUnpack.NET.Compression;
 using InnoUnpack.NET.Metadata;
 
 /*
@@ -13,6 +14,8 @@ using InnoUnpack.NET.Metadata;
  *   bench verify <fixtures-dir>               公共 API + SHA256 校验
  *   bench gc     <fixtures-dir>               分配与 GC 统计（冷进程）
  *   bench gcwarm <fixtures-dir>               池预热后的分配与 GC 统计
+ *   bench crypto <size-mb>                    内存中 XChaCha20 流解密吞吐（SIMD 门禁）
+ *   bench parallel <fixtures-dir>             独立 chunk 并行解码门禁（串行 vs 并发批量）
  */
 
 var fixtures = new[] {
@@ -26,6 +29,17 @@ var fixtures = new[] {
 var mode = args.Length > 0 ? args[0] : "full";
 var dir = args.Length > 1 ? args[1] : ".";
 var only = args.Length > 2 ? args[2] : null;
+
+if (mode == "crypto") {
+	var sizeMb = args.Length > 1 && int.TryParse(args[1], out var m) ? m : 64;
+	RunCryptoBench(sizeMb);
+	return;
+}
+
+if (mode == "parallel") {
+	RunParallelBench(dir);
+	return;
+}
 
 if (mode is "fair" or "fairloop") {
 	RunFixture(only!, mode);
@@ -127,6 +141,114 @@ foreach (var f in fixtures) {
 			break;
 		}
 	}
+}
+
+void RunParallelBench(string fixturesDir) {
+	// 独立 chunk 并行解码门禁：以各 fixture 的固体 chunk 作为独立工作项
+	// （非固体安装包的每个 chunk 组与此等价），串行批量 vs 并发批量，同字节总数对比墙钟时间
+	var paths = new[] {
+		"isetup-4.2.7.exe",
+		"innosetup-5.5.9-unicode.exe",
+		"innosetup-5.6.1-unicode.exe",
+		"innosetup-6.7.3.exe",
+		"innosetup-7.0.2-x64.exe"
+	}.Where(f => File.Exists(Path.Combine(fixturesDir, f)))
+		.Select(f => Path.Combine(fixturesDir, f))
+		.ToArray();
+	if (paths.Length == 0) {
+		Console.WriteLine("no fixtures");
+		return;
+	}
+
+	var opts = new ExtractionOptions { VerifyChecksums = false, PreserveTimestamps = false };
+	var dirs = paths.ToDictionary(p => p, p => Path.Combine(Path.GetTempPath(), "innobench-par", Path.GetFileNameWithoutExtension(p)));
+
+	// 预热（解码器池、JIT）
+	foreach (var p in paths) {
+		using var a = InnoSetupArchive.Open(p);
+		a.ExtractToDirectory(dirs[p], opts);
+	}
+
+	var serialBest = double.MaxValue;
+	for (var r = 0; r < 3; r++) {
+		var sw = Stopwatch.StartNew();
+		foreach (var p in paths) {
+			using var a = InnoSetupArchive.Open(p);
+			a.ExtractToDirectory(dirs[p], opts);
+		}
+
+		sw.Stop();
+		if (sw.Elapsed.TotalSeconds < serialBest) {
+			serialBest = sw.Elapsed.TotalSeconds;
+		}
+	}
+
+	var parallelBest = double.MaxValue;
+	for (var r = 0; r < 3; r++) {
+		var sw = Stopwatch.StartNew();
+		var tasks = paths.Select(p => Task.Run(() => {
+			using var a = InnoSetupArchive.Open(p);
+			a.ExtractToDirectory(dirs[p], opts);
+		})).ToArray();
+		Task.WaitAll(tasks);
+		sw.Stop();
+		if (sw.Elapsed.TotalSeconds < parallelBest) {
+			parallelBest = sw.Elapsed.TotalSeconds;
+		}
+	}
+
+	Console.WriteLine(
+		$"PARALLEL {paths.Length} chunks: serial={serialBest * 1000:F0}ms parallel={parallelBest * 1000:F0}ms speedup={serialBest / parallelBest:F2}x");
+}
+
+void RunCryptoBench(int sizeMb) {
+	var key = Convert.FromHexString("000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F");
+	var nonce = Convert.FromHexString("202122232425262728292A2B2C2D2E2F3031323334353637");
+	var size = sizeMb * 1024 * 1024;
+	var data = new byte[size];
+	new Random(1).NextBytes(data);
+	var encrypted = new byte[size];
+	using (XChaCha20Stream enc = new(new MemoryStream(data), key, nonce)) {
+		enc.ReadExactly(encrypted);
+	}
+
+	// 预热
+	using (XChaCha20Stream warm = new(new MemoryStream(encrypted), key, nonce)) {
+		var probe = new byte[64 * 1024];
+		var total = 0;
+		while (total < size) {
+			var n = warm.Read(probe);
+			if (n <= 0) {
+				break;
+			}
+
+			total += n;
+		}
+	}
+
+	var best = double.MaxValue;
+	for (var r = 0; r < 5; r++) {
+		var sw = Stopwatch.StartNew();
+		using XChaCha20Stream dec = new(new MemoryStream(encrypted), key, nonce);
+		var probe = new byte[256 * 1024];
+		var total = 0;
+		while (total < size) {
+			var n = dec.Read(probe);
+			if (n <= 0) {
+				break;
+			}
+
+			total += n;
+		}
+
+		sw.Stop();
+		var secs = sw.Elapsed.TotalSeconds;
+		if (secs > 0 && secs < best) {
+			best = secs;
+		}
+	}
+
+	Console.WriteLine($"CRYPTO {sizeMb} MiB: best {best * 1000:F0} ms ({size / 1048576.0 / best:F1} MiB/s)");
 }
 
 void RunFixture(string fixture, string mode) {

@@ -65,6 +65,18 @@ sealed class Lzma1Stream : Stream {
 			return 0;
 		}
 
+		// 直接解码路径：无待取缓冲且调用方缓冲 ≥ 一个解码块时，直接解码进调用方缓冲，
+		// 省去 _pending 中转的整块复制（小缓冲如 SkipBytes 仍走 _pending 路径）
+		if (_pendingPos == _pendingLen && !_eof && buffer.Length >= ChunkSize) {
+			var n = _decoder.Decode(_input, buffer, _allowTruncated);
+			if (n > 0) {
+				return n;
+			}
+
+			_eof = true;
+			return 0;
+		}
+
 		while (_pendingPos == _pendingLen) {
 			if (_eof) {
 				return 0;

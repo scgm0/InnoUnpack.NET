@@ -8,6 +8,7 @@ sealed class BZip2Stream(Stream input) : Stream {
 	private readonly BZip2Decoder _decoder = new(input);
 	private bool _eof;
 	private byte[] _pending = [];
+	private int _pendingLen;
 	private int _pendingPos;
 
 	public override bool CanRead => true;
@@ -25,7 +26,7 @@ sealed class BZip2Stream(Stream input) : Stream {
 			return 0;
 		}
 
-		while (_pendingPos == _pending.Length) {
+		while (_pendingPos == _pendingLen) {
 			if (_eof) {
 				return 0;
 			}
@@ -36,18 +37,20 @@ sealed class BZip2Stream(Stream input) : Stream {
 				return 0;
 			}
 
-			_pending = block;
+			_pending = block.Value.Buffer;
+			_pendingLen = block.Value.Length;
 			_pendingPos = 0;
 		}
 
-		var n = Math.Min(_pending.Length - _pendingPos, buffer.Length);
+		var n = Math.Min(_pendingLen - _pendingPos, buffer.Length);
 		_pending.AsSpan(_pendingPos, n).CopyTo(buffer);
 		_pendingPos += n;
-		if (_pendingPos != _pending.Length) {
+		if (_pendingPos != _pendingLen) {
 			return n;
 		}
 
 		_pending = []; // 块已耗尽，下次 Read 解码下一块
+		_pendingLen = 0;
 		_pendingPos = 0;
 		return n;
 	}

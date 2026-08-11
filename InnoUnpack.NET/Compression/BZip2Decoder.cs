@@ -22,11 +22,15 @@ sealed class BZip2Decoder(Stream input) {
 	// 块内复用缓冲（按需扩容）
 	private int[] _mtfIndex = [];
 	private int[] _next = [];
+	private int[] _selector = [];
 	private byte[] _output = [];
 	private bool _streamEnded;
 
-	/// <summary>解码下一个块，返回块解压数据；流结束返回 null。</summary>
-	public byte[]? DecodeNextBlock() {
+	/// <summary>
+	///     解码下一个块，返回块解压数据与有效长度；流结束返回 null。
+	///     缓冲所有权仍属解码器（下次调用前有效），调用方须在下次解码前消费完毕。
+	/// </summary>
+	public (byte[] Buffer, int Length)? DecodeNextBlock() {
 		if (_streamEnded) {
 			return null;
 		}
@@ -74,7 +78,7 @@ sealed class BZip2Decoder(Stream input) {
 		_blockSize100K = header[3] - '0';
 	}
 
-	private byte[] DecodeBlock() {
+	private (byte[] Buffer, int Length) DecodeBlock() {
 		var expectedCrc = _bits.ReadBits(32);
 		_ = _bits.ReadBit(); // randomised（Inno Setup 不使用随机化块，忽略）
 		var origPtr = (int)_bits.ReadBits(24);
@@ -119,7 +123,8 @@ sealed class BZip2Decoder(Stream input) {
 		}
 
 		// 选择器：一元编码（连续 1 后跟 0），再做 MTF 逆
-		var selector = new int[nSelectors];
+		EnsureCapacity(ref _selector, nSelectors);
+		var selector = _selector;
 		var selectorList = new byte[MaxGroups];
 		for (var i = 0; i < nGroups; i++) {
 			selectorList[i] = (byte)i;
@@ -186,9 +191,8 @@ sealed class BZip2Decoder(Stream input) {
 			throw new InnoFormatException("bzip2 块 CRC 校验失败");
 		}
 
-		var result = new byte[outputLen];
-		Array.Copy(_output, result, outputLen);
-		return result;
+		// 直接返回底层输出缓冲与有效长度（所有权仍属解码器，杜绝每块 900KB 的复制与 LOH 分配）
+		return (_output, outputLen);
 	}
 
 	static private void FlushRun(int[] target, ref int nblock, ref int run, out int runBits) {

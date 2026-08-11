@@ -284,20 +284,35 @@ abstract class FileHasher : IDisposable {
 	public abstract bool Verify(InnoChecksum expected);
 
 	/// <summary>按校验和类型创建校验器；类型未知或为 None 时返回 null。</summary>
-	public static FileHasher? Create(InnoChecksumType type) {
+	/// <param name="type">校验和类型。</param>
+	/// <param name="pooledHash">
+	///     可复用的共享 <see cref="IncrementalHash" />（MD5/SHA1/SHA256）；
+	///     传入时校验器不拥有其所有权（<see cref="Dispose" /> 为无操作），
+	///     <see cref="Verify" /> 通过 <see cref="IncrementalHash.GetHashAndReset" /> 复位以供下一个文件复用。
+	/// </param>
+	public static FileHasher? Create(InnoChecksumType type, IncrementalHash? pooledHash = null) {
 		return type switch {
-			InnoChecksumType.Md5 => new IncrementalHasher(InnoChecksumType.Md5, HashAlgorithmName.MD5),
-			InnoChecksumType.Sha1 => new IncrementalHasher(InnoChecksumType.Sha1, HashAlgorithmName.SHA1),
-			InnoChecksumType.Sha256 => new IncrementalHasher(InnoChecksumType.Sha256, HashAlgorithmName.SHA256),
+			InnoChecksumType.Md5 => new IncrementalHasher(InnoChecksumType.Md5,
+				pooledHash ?? IncrementalHash.CreateHash(HashAlgorithmName.MD5),
+				pooledHash is null),
+			InnoChecksumType.Sha1 => new IncrementalHasher(InnoChecksumType.Sha1,
+				pooledHash ?? IncrementalHash.CreateHash(HashAlgorithmName.SHA1),
+				pooledHash is null),
+			InnoChecksumType.Sha256 => new IncrementalHasher(InnoChecksumType.Sha256,
+				pooledHash ?? IncrementalHash.CreateHash(HashAlgorithmName.SHA256),
+				pooledHash is null),
 			InnoChecksumType.Crc32 => new Crc32Hasher(),
 			InnoChecksumType.Adler32 => new Adler32Hasher(),
 			_ => null
 		};
 	}
 
-	sealed private class IncrementalHasher(InnoChecksumType expectedType, HashAlgorithmName algorithm) : FileHasher {
-		private readonly IncrementalHash _hash =
-			IncrementalHash.CreateHash(algorithm);
+	sealed private class IncrementalHasher(
+		InnoChecksumType expectedType,
+		IncrementalHash hash,
+		bool ownsHash) : FileHasher {
+		private readonly IncrementalHash _hash = hash;
+		private readonly bool _ownsHash = ownsHash;
 
 		public override void Update(ReadOnlySpan<byte> data) { _hash.AppendData(data); }
 
@@ -306,7 +321,11 @@ abstract class FileHasher : IDisposable {
 			return expected.Type == expectedType && actual.AsSpan().SequenceEqual(expected.Data);
 		}
 
-		public override void Dispose() { _hash.Dispose(); }
+		public override void Dispose() {
+			if (_ownsHash) {
+				_hash.Dispose();
+			}
+		}
 	}
 
 	sealed private class Crc32Hasher : FileHasher {

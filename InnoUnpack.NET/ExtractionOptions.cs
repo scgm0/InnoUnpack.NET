@@ -51,6 +51,18 @@ public sealed class ExtractionOptions {
 	/// <summary>提取进度事件（绝对进度，同步触发）。</summary>
 	public event Action<ExtractionProgress>? ProgressChanged;
 
+	/// <summary>
+	///     并行提取的最大 chunk 组并发数（默认 1 = 串行）。
+	///     仅对非固体压缩（每文件独立 chunk）的安装包有收益：固体包全部文件共享一个 chunk，
+	///     解码状态串行传递，无法并行。
+	///     每个并发 worker 持有独立的切片读取器与解码器，内存约为
+	///     workers ×（LZMA2 字典 8MiB 起 + 缓冲 ~1MiB）；大字典安装包（64MiB 级）需相应调低。
+	///     并行时进度事件可能在多个线程交错触发（绝对累计值不变，调用方需线程安全）；
+	///     通过 <see cref="InnoSetupArchive.Open(string, InnoOpenOptions)" /> 打开时并行生效，
+	///     通过 <see cref="InnoSetupArchive.Open(System.IO.Stream, InnoOpenOptions, bool)" /> 打开时回退为串行。
+	/// </summary>
+	public int MaxParallelism { get; set; } = 1;
+
 	/// <summary>触发进度事件（提取引擎内部调用）。</summary>
 	internal void RaiseProgressChanged(ulong bytesExtracted, int filesExtracted, string? currentFileName) {
 		ProgressChanged?.Invoke(new(bytesExtracted, filesExtracted, currentFileName));
