@@ -64,6 +64,17 @@ options.ProgressChanged += p =>
 await archive.ExtractToDirectoryAsync("output", options);
 ```
 
+**手动停止提取**：同步与异步 API 均支持 `CancellationToken`（逐文件与文件内读写块边界检查，
+取消时抛出 `OperationCanceledException`，已完成的文件保留）：
+
+```csharp
+using var cts = new CancellationTokenSource();
+cts.CancelAfter(TimeSpan.FromSeconds(5)); // 或由用户操作触发 cts.Cancel()
+
+archive.ExtractToDirectory("output", options, cts.Token);        // 同步
+await archive.ExtractToDirectoryAsync("output", options, cts.Token); // 异步
+```
+
 ## 加密安装包
 
 ```csharp
@@ -116,9 +127,9 @@ Inno Setup 官方安装器（innoextract 1.9
 
 | fixture                              | 大小    | innoextract | 本库 JIT（冷进程） | 本库 JIT（热路径） | 本库 AOT-Speed（冷进程） |
 |--------------------------------------|---------|-------------|--------------------|--------------------|--------------------------|
-| isetup-4.2.7.exe（LZMA1）            | 2.9 MiB | 41 ms       | 130 ms             | 84 ms              | **86 ms**                |
-| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB | 87 ms       | 168 ms             | 114 ms             | **117 ms**               |
-| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB | 96 ms       | 156 ms             | 112 ms             | **114 ms**               |
+| isetup-4.2.7.exe（LZMA1）            | 2.9 MiB | 42 ms       | 127 ms             | 86 ms              | **86 ms**                |
+| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB | 88 ms       | 165 ms             | 117 ms             | **118 ms**               |
+| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB | 97 ms       | 152 ms             | 113 ms             | **114 ms**               |
 
 - **热路径（库场景，进程内预热）**：与 innoextract 差距约 **1.2–2.1x**，剩余差距来自
   纯托管 LZMA 位解码器 vs liblzma 的原生标量代码（LZMA range coder 为串行位依赖，双方均无 SIMD）
@@ -132,11 +143,11 @@ Inno Setup 官方安装器（innoextract 1.9
 
 | fixture                     | Default | Speed      | Size   |
 |-----------------------------|---------|------------|--------|
-| isetup-4.2.7.exe            | 116 ms  | **86 ms**  | 116 ms |
-| innosetup-5.5.9-unicode.exe | 154 ms  | **117 ms** | 157 ms |
-| innosetup-5.6.1-unicode.exe | 151 ms  | **114 ms** | 153 ms |
+| isetup-4.2.7.exe            | 117 ms  | **86 ms**  | 118 ms |
+| innosetup-5.5.9-unicode.exe | 156 ms  | **118 ms** | 161 ms |
+| innosetup-5.6.1-unicode.exe | 148 ms  | **114 ms** | 154 ms |
 
-`OptimizationPreference=Speed` 耗时为 Default/Size 的 **0.74–0.76 倍**（快约 32–35%）；
+`OptimizationPreference=Speed` 耗时为 Default/Size 的 **0.74–0.77 倍**（快约 30–36%）；
 热路径下 AOT-Speed 与 JIT 持平，Default/Size 约慢 30% 左右（JIT 分层编译对热点循环生成更好的代码）。
 原生二进制约 3 MB，无运行时依赖。
 
@@ -144,16 +155,16 @@ Inno Setup 官方安装器（innoextract 1.9
 
 | fixture                              | 大小     | JIT     | AOT-Speed |
 |--------------------------------------|----------|---------|-----------|
-| isetup-4.2.7.exe（LZMA1）            | 3.0 MiB  | 101 ms  | 93 ms     |
-| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB  | 130 ms  | 120 ms    |
-| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB  | 121 ms  | 116 ms    |
-| innosetup-6.7.3.exe（LZMA2）         | 27.6 MiB | 588 ms  | 614 ms    |
-| innosetup-7.0.2-x64.exe（LZMA2）     | 49.0 MiB | 1056 ms | 1087 ms   |
+| isetup-4.2.7.exe（LZMA1）            | 3.0 MiB  | 100 ms  | 95 ms     |
+| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB  | 128 ms  | 122 ms    |
+| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB  | 125 ms  | 117 ms    |
+| innosetup-6.7.3.exe（LZMA2）         | 27.6 MiB | 634 ms  | 633 ms    |
+| innosetup-7.0.2-x64.exe（LZMA2）     | 49.0 MiB | 1052 ms | 1110 ms   |
 
 ### 内存
 
 - 解码器字典/概率表/输入输出缓冲全部经 `ArrayPool` 租用并在流销毁时归还： **大缓冲零分配、
-  提取全程 GC 零收集**（gc0/gc1/gc2 均为 0 次）；池预热后单次提取仅约 0.6 MiB 小对象分配
+  提取全程 GC 零收集**（gc0/gc1/gc2 均为 0 次）；池预热后单次提取仅 0.4–0.6 MiB 小对象分配
 - 文件写出使用 `RandomAccess` 直接 OS 写入，无 FileStream 内部缓冲分配
 
 ### 复现
@@ -161,6 +172,8 @@ Inno Setup 官方安装器（innoextract 1.9
 ```bash
 # 工具与脚本位于 tools/bench
 bash tools/bench/compare.sh <fixtures-dir>   # 自动发布 AOT×3 并输出全部对比表
+dotnet run --project tools/bench -c Release -- <fixtures-dir> gc      # 冷进程分配/GC
+dotnet run --project tools/bench -c Release -- <fixtures-dir> gcwarm  # 池预热后分配/GC
 ```
 
 Windows 对应版本（PowerShell 5.1+/7 均可）：

@@ -35,7 +35,7 @@ public sealed class InnoArchiveFile {
 	public string SourceName { get; internal init; } = string.Empty;
 
 	/// <summary>存储的目标路径（可能包含 {app} 等常量，Windows 风格分隔符）。</summary>
-	public string Destination { get; internal set; } = string.Empty;
+	public string Destination { get; internal init; } = string.Empty;
 
 	/// <summary>展开变量后的输出相对路径。</summary>
 	public string Path { get; internal init; } = string.Empty;
@@ -47,16 +47,16 @@ public sealed class InnoArchiveFile {
 	public DateTime Timestamp { get; internal init; }
 
 	/// <summary>文件版本（64 位）。</summary>
-	public ulong FileVersion { get; internal set; }
+	public ulong FileVersion { get; internal init; }
 
 	/// <summary>选项标志。</summary>
 	public InnoFileOptions Options { get; internal init; }
 
 	/// <summary>文件类型。</summary>
-	public InnoFileType Type { get; internal set; } = InnoFileType.UserFile;
+	public InnoFileType Type { get; internal init; } = InnoFileType.UserFile;
 
 	/// <summary>内部：原始文件条目。</summary>
-	internal InnoFileEntry Entry { get; set; } = new();
+	internal InnoFileEntry Entry { get; init; } = new();
 
 	/// <summary>内部：对应的数据条目。</summary>
 	internal InnoDataEntry DataEntry { get; init; } = new();

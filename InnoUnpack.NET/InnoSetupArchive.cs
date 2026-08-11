@@ -316,15 +316,21 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	}
 
 	/// <summary>
-	///     提取整个安装包到目录。
+	///     提取整个安装包到目录（可取消）。
 	///     文件按 chunk 分组提取：同一 chunk 只解码一次（安装包通常为固体压缩，
 	///     全部文件共享一个 chunk，逐文件重开会导致数十倍冗余解码）。
 	///     写出顺序为 chunk/数据偏移顺序（与 innoextract 一致）。
+	///     取消令牌在逐文件与文件内读写块边界检查；取消时抛出
+	///     <see cref="OperationCanceledException" />，已完成的文件保留在输出目录。
 	///     进度为绝对进度（当前字节数/文件数），总数可通过 <see cref="FileCount" /> 与
 	///     <see cref="TotalFileSize" /> 获取，由调用方自行计算百分比。
 	/// </summary>
+	/// <exception cref="OperationCanceledException">取消令牌已触发。</exception>
 	/// <exception cref="InnoUnsupportedException">存在加密文件且未提供密码支持。</exception>
-	public void ExtractToDirectory(string outputDirectory, ExtractionOptions? options = null) {
+	public void ExtractToDirectory(
+		string outputDirectory,
+		ExtractionOptions? options = null,
+		CancellationToken cancellationToken = default) {
 		ArgumentNullException.ThrowIfNull(outputDirectory);
 		options ??= new();
 		var outputRoot = Path.GetFullPath(outputDirectory);
@@ -336,7 +342,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 
 		List<InnoArchiveFile> files = [.. EnumerateFiles()];
 
-		var (extracted, filesExtracted) = ExtractByChunk(files, outputRoot, options);
+		var (extracted, filesExtracted) = ExtractByChunk(files, outputRoot, options, cancellationToken);
 		options.RaiseProgressChanged(extracted, filesExtracted, null);
 	}
 
@@ -371,27 +377,76 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	}
 
 	/// <summary>
+	///     按 chunk（起始切片, 偏移）分组文件，组间按 chunk 位置、组内按数据偏移排序。
+	///     手动实现替代 LINQ GroupBy/OrderBy：提取启动期零闭包/排序器分配
+	///     （<see cref="List{T}.Sort(Comparison{T})" /> 使用静态 lambda 原地排序）。
+	///     组键唯一，组间顺序与 LINQ 版本一致；组内同偏移的重复条目数据相同，非稳定排序不影响结果。
+	///     固体压缩的常见形态（全部文件共享一个 chunk）走快速路径：
+	///     O(n) 扫描确认后直接原地排序，跳过字典与分组分配。
+	/// </summary>
+	static private List<KeyValuePair<(uint FirstSlice, ulong Offset), List<InnoArchiveFile>>> GroupFilesByChunk(
+		List<InnoArchiveFile> files) {
+		// 单 chunk 快速路径：全部文件共享同一 (FirstSlice, Offset) 时无需分组
+		var first = files[0].DataEntry;
+		var singleChunk = true;
+		foreach (var file in files) {
+			if (file.DataEntry.FirstSlice != first.FirstSlice || file.DataEntry.Offset != first.Offset) {
+				singleChunk = false;
+				break;
+			}
+		}
+
+		if (singleChunk) {
+			files.Sort(static (a, b) => a.DataEntry.FileOffset.CompareTo(b.DataEntry.FileOffset));
+			return [new KeyValuePair<(uint FirstSlice, ulong Offset), List<InnoArchiveFile>>((first.FirstSlice, first.Offset), files)];
+		}
+
+		var groups = new Dictionary<(uint FirstSlice, ulong Offset), List<InnoArchiveFile>>(files.Count);
+		foreach (var file in files) {
+			var key = (file.DataEntry.FirstSlice, file.DataEntry.Offset);
+			if (!groups.TryGetValue(key, out var chunkFiles)) {
+				groups.Add(key, chunkFiles = []);
+			}
+
+			chunkFiles.Add(file);
+		}
+
+		var orderedGroups = new List<KeyValuePair<(uint FirstSlice, ulong Offset), List<InnoArchiveFile>>>(groups);
+		orderedGroups.Sort(static (a, b) => {
+			var slice = a.Key.FirstSlice.CompareTo(b.Key.FirstSlice);
+			return slice != 0 ? slice : a.Key.Offset.CompareTo(b.Key.Offset);
+		});
+
+		foreach (var group in orderedGroups) {
+			group.Value.Sort(static (a, b) => a.DataEntry.FileOffset.CompareTo(b.DataEntry.FileOffset));
+		}
+
+		return orderedGroups;
+	}
+
+	/// <summary>
 	///     按 chunk 分组批量提取（同步）：同一 chunk 只打开/解码一次，
 	///     组内文件按数据偏移（<see cref="InnoDataEntry.FileOffset" />）顺序流式取出。
 	/// </summary>
 	internal (ulong Extracted, int FilesExtracted) ExtractByChunk(
 		List<InnoArchiveFile> files,
 		string outputRoot,
-		ExtractionOptions options) {
+		ExtractionOptions options,
+		CancellationToken cancellationToken = default) {
 		ulong extracted = 0;
 		var filesExtracted = 0;
 
-		foreach (var group in files
-			.GroupBy(file => (file.DataEntry.FirstSlice, file.DataEntry.Offset))
-			.OrderBy(g => g.Key.FirstSlice)
-			.ThenBy(g => g.Key.Offset)) {
-			var chunk = ChunkReader.Open(_slices, group.First().DataEntry, _crypto);
+		foreach (var group in GroupFilesByChunk(files)) {
+			var chunkFiles = group.Value;
+			var chunk = ChunkReader.Open(_slices, chunkFiles[0].DataEntry, _crypto);
 			var chunkStream = chunk.Stream;
 			long chunkPos = 0;
 			// 提取缓冲：整个 chunk 批次复用一份（解压+写盘共用），避免每文件分配
 			var buffer = new byte[81920];
 			try {
-				foreach (var file in group.OrderBy(f => f.DataEntry.FileOffset)) {
+				foreach (var file in chunkFiles) {
+					cancellationToken.ThrowIfCancellationRequested();
+
 					if (ShouldSkipTemporary(file, options)) {
 						filesExtracted++;
 						ReportProgress(options, extracted, filesExtracted, file.Path);
@@ -441,6 +496,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 							? FileHasher.Create(file.DataEntry.Checksum.Type)
 							: null;
 						while (remaining > 0) {
+							cancellationToken.ThrowIfCancellationRequested();
 							var toRead = (int)Math.Min(buffer.Length, remaining);
 							var n = source.Read(buffer, 0, toRead);
 							if (n <= 0) {
@@ -486,17 +542,15 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		ulong extracted = 0;
 		var filesExtracted = 0;
 
-		foreach (var group in files
-			.GroupBy(file => (file.DataEntry.FirstSlice, file.DataEntry.Offset))
-			.OrderBy(g => g.Key.FirstSlice)
-			.ThenBy(g => g.Key.Offset)) {
-			var chunk = ChunkReader.Open(_slices, group.First().DataEntry, _crypto);
+		foreach (var group in GroupFilesByChunk(files)) {
+			var chunkFiles = group.Value;
+			var chunk = ChunkReader.Open(_slices, chunkFiles[0].DataEntry, _crypto);
 			var chunkStream = chunk.Stream;
 			long chunkPos = 0;
 			// 提取缓冲：整个 chunk 批次复用一份（解压+写盘共用），避免每文件分配
 			var buffer = new byte[81920];
 			try {
-				foreach (var file in group.OrderBy(f => f.DataEntry.FileOffset)) {
+				foreach (var file in chunkFiles) {
 					cancellationToken.ThrowIfCancellationRequested();
 
 					if (ShouldSkipTemporary(file, options)) {

@@ -147,4 +147,62 @@ public class ArchiveSmokeTests {
 		Assert.Equal(totalBytes, bytesExtracted);
 		Assert.True(sawCompletion, "应以 CurrentFileName=null 的完成事件结束");
 	}
+
+	[Theory]
+	[InlineData("isetup-4.2.7.exe")]
+	[InlineData("innosetup-6.7.3.exe")]
+	public void SyncExtractionCanBeCancelled(string fixture) {
+		Fixtures.SkipIfMissing(fixture);
+
+		using var archive = InnoSetupArchive.Open(Fixtures.Get(fixture));
+		var outputDir = Path.Combine(Path.GetTempPath(), "innounpack-tests", "cancel-sync");
+		if (Directory.Exists(outputDir)) {
+			Directory.Delete(outputDir, true);
+		}
+
+		try {
+			using var cts = new CancellationTokenSource();
+			// 进度回调中取消：至少解出第一个文件后立即停止
+			var options = new ExtractionOptions { VerifyChecksums = false };
+			options.ProgressChanged += _ => cts.Cancel();
+
+			var ex = Assert.Throws<OperationCanceledException>(() =>
+				archive.ExtractToDirectory(outputDir, options, cts.Token));
+
+			Assert.True(cts.IsCancellationRequested, "取消应已触发");
+			_ = ex;
+		} finally {
+			if (Directory.Exists(outputDir)) {
+				Directory.Delete(outputDir, true);
+			}
+		}
+	}
+
+	[Theory]
+	[InlineData("isetup-4.2.7.exe")]
+	[InlineData("innosetup-6.7.3.exe")]
+	public async Task AsyncExtractionCanBeCancelled(string fixture) {
+		Fixtures.SkipIfMissing(fixture);
+
+		using var archive = InnoSetupArchive.Open(Fixtures.Get(fixture));
+		var outputDir = Path.Combine(Path.GetTempPath(), "innounpack-tests", "cancel-async");
+		if (Directory.Exists(outputDir)) {
+			Directory.Delete(outputDir, true);
+		}
+
+		try {
+			using var cts = new CancellationTokenSource();
+			cts.CancelAfter(50); // 开始后 50ms 取消（覆盖逐文件与块级检查）
+
+			// 取消可能落在自检（OperationCanceledException）或异步 IO（TaskCanceledException，其子类）上
+			await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+				archive.ExtractToDirectoryAsync(outputDir, new ExtractionOptions { VerifyChecksums = false }, cts.Token));
+
+			Assert.True(cts.IsCancellationRequested, "取消应已触发");
+		} finally {
+			if (Directory.Exists(outputDir)) {
+				Directory.Delete(outputDir, true);
+			}
+		}
+	}
 }

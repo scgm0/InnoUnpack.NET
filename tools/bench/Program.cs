@@ -79,6 +79,34 @@ foreach (var f in fixtures) {
 			Console.WriteLine($"  verify+extract: {sw.ElapsedMilliseconds} ms  ({archive.TotalFileSize / 1048576.0 / sw.Elapsed.TotalSeconds:F1} MiB/s)");
 			break;
 		}
+		case "gcwarm": {
+			// 池预热后（进程内第二次提取）的分配与 GC 统计
+			var opts = new ExtractionOptions { VerifyChecksums = false };
+			var warmDir = Path.Combine(Path.GetTempPath(), "innobench-gcwarm");
+			if (Directory.Exists(warmDir)) {
+				Directory.Delete(warmDir, true);
+			}
+
+			archive.ExtractToDirectory(warmDir, opts);
+			Directory.Delete(warmDir, true);
+
+			var beforeAlloc = GC.GetTotalAllocatedBytes();
+			var g0 = GC.CollectionCount(0);
+			var g1 = GC.CollectionCount(1);
+			var g2 = GC.CollectionCount(2);
+			var outDir = Path.Combine(Path.GetTempPath(), "innobench-gcwarm-run");
+			if (Directory.Exists(outDir)) {
+				Directory.Delete(outDir, true);
+			}
+
+			var sw = Stopwatch.StartNew();
+			archive.ExtractToDirectory(outDir, opts);
+			sw.Stop();
+			Directory.Delete(outDir, true);
+			var allocKB = (GC.GetTotalAllocatedBytes() - beforeAlloc) / 1024.0;
+			Console.WriteLine($"  {sw.ElapsedMilliseconds} ms, warm-run allocated {allocKB:F0} KiB, gc0={GC.CollectionCount(0) - g0} gc1={GC.CollectionCount(1) - g1} gc2={GC.CollectionCount(2) - g2}");
+			break;
+		}
 		case "gc": {
 			var beforeAlloc = GC.GetTotalAllocatedBytes();
 			var g0 = GC.CollectionCount(0);
