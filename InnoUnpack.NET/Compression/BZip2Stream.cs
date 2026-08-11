@@ -63,7 +63,8 @@ sealed class BZip2Stream(Stream input) : Stream {
 
 	override protected void Dispose(bool disposing) {
 		if (disposing) {
-			// 解码器不拥有输入流的所有权（工厂链的中间层），不释放
+			// 归还解码器租用的块缓冲（解码器不拥有输入流的所有权，不释放输入）
+			_decoder.Dispose();
 		}
 
 		base.Dispose(disposing);

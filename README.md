@@ -18,7 +18,8 @@
 - 目录权限与属性应用（POSIX 权限 / Windows 文件属性，`ApplyDirectoryAttributes`，默认关闭）
 - 逐文件提取过滤与输出路径映射（`FileFilter` / `OutputPathMapper`）
 - 提取取消（同步/异步均支持 `CancellationToken`）
-- **并行提取**：多个 archive 实例可并发；单包内 `ExtractionOptions.MaxParallelism` 并行独立 chunk 组（仅对非固体安装包有收益，经文件路径打开时生效）
+- **并行提取**：多个 archive 实例可并发；单包内 `ExtractionOptions.MaxParallelism` 并行独立 chunk 组
+  （仅对非固体安装包有收益，经文件路径打开时生效；固体包为单 LZMA2 流，chunk 间概率模型延续，无法并行）
 - 文件校验和验证（MD5 / SHA1 / SHA256 / CRC32 / Adler32）
 - 异步 API（`OpenAsync` / `ExtractToDirectoryAsync` / `IAsyncDisposable`）
 - 基于 **文件数**与 **字节数**的进度报告（绝对进度，百分比由调用方计算）
@@ -148,7 +149,7 @@ archive.ExtractToDirectory("output");
 - **依赖：零**（无 NuGet 依赖；`bzip2` 与加密算法自定义实现，`LZMA1`/`LZMA2` 移植自 LZMA SDK，`zlib` 使用 .NET 内置）
 - **NativeAOT 兼容**（无反射，可 `PublishAot=true` 发布为原生二进制）
 - **多线程并行**：不同 archive 实例间无共享可变状态（静态初始化已线程安全），
-  多个安装包可同时提取；同一实例不支持并发访问
+  多个安装包可同时提取；同一实例不支持并发调用（`MaxParallelism` 为单次调用内部的组间并行）
 - 已知限制：
     - 5.x+ 安装包的卸载程序（UninstExe）数据由安装器运行时生成，不包含在包内（不提取）
     - 加密安装包的 6.5.0+ 解密支持经过算法级验证，但尚未经真实加密样本端到端验证
@@ -158,19 +159,20 @@ archive.ExtractToDirectory("output");
 ### 与 innoextract 对比（同等条件）
 
 同一文件集（排除 innoextract 默认跳过的卸载程序）、关闭校验和与时间戳、相同输出目录、 **best-of-7**。测试机：i5-9300H，Linux，测试夹具为
-Inno Setup 官方安装器（innoextract 1.9
-仅支持到 Inno Setup 6.0.5，故可对比 3 个）：
+Inno Setup 官方安装器（innoextract 1.9 声明支持至 Inno Setup 6.0.5，故可对比 3 个）：
 
 | fixture                              | 大小    | innoextract | 本库 JIT（冷进程） | 本库 JIT（热路径） | 本库 AOT-Speed（冷进程） |
 |--------------------------------------|---------|-------------|--------------------|--------------------|--------------------------|
-| isetup-4.2.7.exe（LZMA1）            | 2.9 MiB | 42 ms       | 127 ms             | 86 ms              | **86 ms**                |
-| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB | 88 ms       | 165 ms             | 117 ms             | **118 ms**               |
-| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB | 97 ms       | 152 ms             | 113 ms             | **114 ms**               |
+| isetup-4.2.7.exe（LZMA1）            | 2.9 MiB | 43 ms       | 99 ms              | 82 ms              | **82 ms**                |
+| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB | 86 ms       | 128 ms             | 106 ms             | **109 ms**               |
+| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB | 103 ms      | 124 ms             | 102 ms             | **106 ms**               |
 
-- **热路径（库场景，进程内预热）**：与 innoextract 差距约 **1.2–2.1x**，剩余差距来自
-  纯托管 LZMA 位解码器 vs liblzma 的原生标量代码（LZMA range coder 为串行位依赖，双方均无 SIMD）
-- **冷进程（CLI 场景）**：AOT 消除了 JIT 编译开销（约 40–50 ms），AOT-Speed 冷启动与
-  JIT 热路径基本持平
+- **热路径（库场景，进程内预热）**：差距约 1.0–1.9x（5.6.1 样本已与 innoextract 持平）。
+  剩余差距来自纯托管 LZMA 位解码器 vs liblzma 的原生标量代码（LZMA range coder 为串行位依赖，
+  每比特一次 32 位乘法，双方均无 SIMD 空间）；实测内联、去异常处理等 JIT 结构调整均无正收益
+- **冷进程（CLI 场景）**：JIT 编译开销约 17–22 ms；AOT 消除后冷启动与 JIT 热路径持平
+- **并行说明**：固体包为单个 LZMA2 流，chunk 间概率模型延续（串行依赖），并行解码不可行
+  （与 liblzma 多线程解码对无 reset 标记流的行为一致）；`MaxParallelism` 仅对非固体包生效
 
 ### AOT（NativeAOT）三种 OptimizationPreference
 
@@ -179,11 +181,11 @@ Inno Setup 官方安装器（innoextract 1.9
 
 | fixture                     | Default | Speed      | Size   |
 |-----------------------------|---------|------------|--------|
-| isetup-4.2.7.exe            | 117 ms  | **86 ms**  | 118 ms |
-| innosetup-5.5.9-unicode.exe | 156 ms  | **118 ms** | 161 ms |
-| innosetup-5.6.1-unicode.exe | 148 ms  | **114 ms** | 154 ms |
+| isetup-4.2.7.exe            | 112 ms  | **82 ms**  | 111 ms |
+| innosetup-5.5.9-unicode.exe | 148 ms  | **109 ms** | 151 ms |
+| innosetup-5.6.1-unicode.exe | 142 ms  | **106 ms** | 141 ms |
 
-`OptimizationPreference=Speed` 耗时为 Default/Size 的 **0.74–0.77 倍**（快约 30–36%）；
+`OptimizationPreference=Speed` 耗时为 Default/Size 的 **0.73–0.75 倍**（快约 25–27%）；
 热路径下 AOT-Speed 与 JIT 持平，Default/Size 约慢 30% 左右（JIT 分层编译对热点循环生成更好的代码）。
 原生二进制约 3 MB，无运行时依赖。
 
@@ -191,8 +193,8 @@ Inno Setup 官方安装器（innoextract 1.9
 
 - 解码器字典/概率表/输入输出缓冲全部经 `ArrayPool` 租用并在流销毁时归还： **大缓冲零分配、
   提取全程 GC 零收集**（gc0/gc1/gc2 均为 0 次）；池预热后单次提取仅 0.23–0.55 MiB 小对象分配
-- bzip2 块输出直接手交解码器缓冲（消除每块最大 900KB 的 LOH 复制）；提取泵（256KB）、
-  `SkipBytes` 跳跃缓冲全部池化；MD5/SHA1/SHA256 校验哈希跨文件复用（`GetHashAndReset`）
+- bzip2 块缓冲（≤900 KB）同样经 `ArrayPool` 租用并随流销毁归还（块输出直接手交解码器缓冲，
+  无 LOH 复制）；提取泵（256KB）、`SkipBytes` 跳跃缓冲全部池化；MD5/SHA1/SHA256 校验哈希跨文件复用（`GetHashAndReset`）
 - 文件写出使用 `RandomAccess` 直接 OS 写入，无 FileStream 内部缓冲分配
 
 ### 异步语义

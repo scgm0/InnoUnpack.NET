@@ -1,12 +1,15 @@
 namespace InnoUnpack.NET.Compression;
 
+using System.Buffers;
+
 /// <summary>
 ///     bzip2 块解码器（块式，MSB-first 位序）。
 ///     依据公开的 bzip2 格式规范独立实现（参考 Julian Seward 的 bzip2 文档与
 ///     libbz2 的格式描述，非代码移植）。
 ///     管道：Huffman → RLE2 逆（RUNA/RUNB）→ MTF 逆 → BWT 逆 → RLE1 逆 → 块输出。
+///     块级大缓冲（≤900KB，LOH 尺寸）经 ArrayPool 租用并在流销毁时归还。
 /// </summary>
-sealed class BZip2Decoder(Stream input) {
+sealed class BZip2Decoder(Stream input) : IDisposable {
 	private const ulong BlockMagic = 0x314159265359; // "1AY&SY"
 	private const ulong EndMagic = 0x177245385090; // "\x17rE8P\x90"
 	private const int GroupSize = 50;
@@ -17,14 +20,20 @@ sealed class BZip2Decoder(Stream input) {
 
 	private int _blockSize100K;
 	private byte[] _bwt = [];
+	private bool _bwtRented;
 	private bool _headerRead;
 
-	// 块内复用缓冲（按需扩容）
+	// 块内复用缓冲（ArrayPool 租用，按需扩容）
 	private int[] _mtfIndex = [];
+	private bool _mtfIndexRented;
 	private int[] _next = [];
+	private bool _nextRented;
 	private int[] _selector = [];
+	private bool _selectorRented;
 	private byte[] _output = [];
+	private bool _outputRented;
 	private bool _streamEnded;
+	private bool _disposed;
 
 	/// <summary>
 	///     解码下一个块，返回块解压数据与有效长度；流结束返回 null。
@@ -123,7 +132,7 @@ sealed class BZip2Decoder(Stream input) {
 		}
 
 		// 选择器：一元编码（连续 1 后跟 0），再做 MTF 逆
-		EnsureCapacity(ref _selector, nSelectors);
+		EnsureCapacity(ref _selector, ref _selectorRented, nSelectors);
 		var selector = _selector;
 		var selectorList = new byte[MaxGroups];
 		for (var i = 0; i < nGroups; i++) {
@@ -161,7 +170,7 @@ sealed class BZip2Decoder(Stream input) {
 		}
 
 		// 主数据：解码符号流（RUNA/RUNB 展开）到 MTF 索引数组
-		EnsureCapacity(ref _mtfIndex, maxBlock);
+		EnsureCapacity(ref _mtfIndex, ref _mtfIndexRented, maxBlock);
 		var nblock = DecodeSymbolStream(nInUse,
 			nSelectors,
 			selector,
@@ -177,12 +186,12 @@ sealed class BZip2Decoder(Stream input) {
 		}
 
 		// MTF 逆 → BWT 字符
-		EnsureCapacity(ref _bwt, nblock);
+		EnsureCapacity(ref _bwt, ref _bwtRented, nblock);
 		InverseMtf(_mtfIndex, nblock, nInUse, seqToUnseq, _bwt);
 
 		// BWT 逆 + RLE1 展开
-		EnsureCapacity(ref _next, nblock);
-		EnsureCapacity(ref _output, maxBlock);
+		EnsureCapacity(ref _next, ref _nextRented, nblock);
+		EnsureCapacity(ref _output, ref _outputRented, maxBlock);
 		var outputLen = InverseBwtAndRle1(_bwt, _next, nblock, origPtr, _output, maxBlock);
 
 		// CRC 校验（bzip2 风格：非反射多项式 0x04C11DB7）
@@ -191,7 +200,7 @@ sealed class BZip2Decoder(Stream input) {
 			throw new InnoFormatException("bzip2 块 CRC 校验失败");
 		}
 
-		// 直接返回底层输出缓冲与有效长度（所有权仍属解码器，杜绝每块 900KB 的复制与 LOH 分配）
+		// 直接返回底层输出缓冲与有效长度（所有权仍属解码器，缓冲经 ArrayPool 租用，杜绝每块 900KB 的复制与重复 LOH 分配）
 		return (_output, outputLen);
 	}
 
@@ -447,16 +456,68 @@ sealed class BZip2Decoder(Stream input) {
 		endCode[group] = end;
 	}
 
-	static private void EnsureCapacity(ref byte[] buffer, int required) {
-		if (buffer.Length < required) {
-			buffer = new byte[required];
+	/// <summary>归还 ArrayPool 租用的缓冲（流销毁时调用，幂等）。</summary>
+	public void Dispose() {
+		if (_disposed) {
+			return;
+		}
+
+		_disposed = true;
+		if (_bwtRented) {
+			ArrayPool<byte>.Shared.Return(_bwt);
+			_bwt = [];
+			_bwtRented = false;
+		}
+
+		if (_outputRented) {
+			ArrayPool<byte>.Shared.Return(_output);
+			_output = [];
+			_outputRented = false;
+		}
+
+		if (_mtfIndexRented) {
+			ArrayPool<int>.Shared.Return(_mtfIndex);
+			_mtfIndex = [];
+			_mtfIndexRented = false;
+		}
+
+		if (_nextRented) {
+			ArrayPool<int>.Shared.Return(_next);
+			_next = [];
+			_nextRented = false;
+		}
+
+		if (_selectorRented) {
+			ArrayPool<int>.Shared.Return(_selector);
+			_selector = [];
+			_selectorRented = false;
 		}
 	}
 
-	static private void EnsureCapacity(ref int[] buffer, int required) {
-		if (buffer.Length < required) {
-			buffer = new int[required];
+	static private void EnsureCapacity(ref byte[] buffer, ref bool rented, int required) {
+		if (buffer.Length >= required) {
+			return;
 		}
+
+		if (rented) {
+			ArrayPool<byte>.Shared.Return(buffer);
+		}
+
+		buffer = ArrayPool<byte>.Shared.Rent(required);
+		rented = true;
+	}
+
+	static private void EnsureCapacity(ref int[] buffer, ref bool rented, int required) {
+		if (buffer.Length >= required) {
+			return;
+		}
+
+		if (rented) {
+			ArrayPool<int>.Shared.Return(buffer);
+		}
+
+		buffer = ArrayPool<int>.Shared.Rent(required);
+		rented = true;
 	}
 
 	/// <summary>MSB-first 位读取器（bzip2 位序，块缓冲避免逐字节 ReadByte）。</summary>

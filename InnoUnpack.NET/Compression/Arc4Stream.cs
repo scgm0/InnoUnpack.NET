@@ -1,5 +1,8 @@
 namespace InnoUnpack.NET.Compression;
 
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
 /// <summary>
 ///     ARC4（RC4）流解密器，用于 Inno Setup 4.2.2 – 6.3.x 的加密 chunk。
 ///     标准 RC4 算法（Rivest 1987，公开算法），读取底层流并逐字节异或 ARC4 密钥流。
@@ -32,11 +35,8 @@ sealed class Arc4Stream : Stream {
 
 	public override int Read(byte[] buffer, int offset, int count) {
 		var n = _inner.Read(buffer, offset, count);
-		for (var k = 0; k < n; k++) {
-			_i = _i + 1 & 0xFF;
-			_j = _j + _state[_i] & 0xFF;
-			(_state[_i], _state[_j]) = (_state[_j], _state[_i]);
-			buffer[offset + k] ^= _state[_state[_i] + _state[_j] & 0xFF];
+		if (n > 0) {
+			Xor(buffer.AsSpan(offset, n));
 		}
 
 		return n;
@@ -44,14 +44,30 @@ sealed class Arc4Stream : Stream {
 
 	public override int Read(Span<byte> buffer) {
 		var n = _inner.Read(buffer);
-		for (var k = 0; k < n; k++) {
-			_i = _i + 1 & 0xFF;
-			_j = _j + _state[_i] & 0xFF;
-			(_state[_i], _state[_j]) = (_state[_j], _state[_i]);
-			buffer[k] ^= _state[_state[_i] + _state[_j] & 0xFF];
+		if (n > 0) {
+			Xor(buffer[..n]);
 		}
 
 		return n;
+	}
+
+	/// <summary>RC4 密钥流异或：ref 风格消除索引边界检查与元组交换临时量。</summary>
+	private void Xor(Span<byte> buffer) {
+		ref var buf = ref MemoryMarshal.GetReference(buffer);
+		ref var state = ref MemoryMarshal.GetArrayDataReference(_state);
+		var i = _i;
+		var j = _j;
+		for (var k = 0; k < buffer.Length; k++) {
+			i = i + 1 & 0xFF;
+			j = j + Unsafe.Add(ref state, i) & 0xFF;
+			var t = Unsafe.Add(ref state, i);
+			Unsafe.Add(ref state, i) = Unsafe.Add(ref state, j);
+			Unsafe.Add(ref state, j) = t;
+			Unsafe.Add(ref buf, k) ^= Unsafe.Add(ref state, Unsafe.Add(ref state, i) + Unsafe.Add(ref state, j) & 0xFF);
+		}
+
+		_i = i;
+		_j = j;
 	}
 
 	public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }

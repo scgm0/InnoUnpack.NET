@@ -320,6 +320,7 @@ sealed class Lzma1Decoder {
 	///     输入耗尽时：<paramref name="allowTruncated" /> 为 true 时用 0xFF 填充继续解码
 	///     （Inno Setup 块尾部的宽容模式），否则停止。
 	/// </summary>
+	[MethodImpl(MethodImplOptions.AggressiveOptimization)]
 	public int Decode(Stream input, Span<byte> output, bool allowTruncated) {
 		if (output.IsEmpty) {
 			return 0;
@@ -427,6 +428,7 @@ sealed class Lzma1Decoder {
 		return total;
 	}
 
+	[MethodImpl(MethodImplOptions.AggressiveOptimization)]
 	private bool DecodeToDic(Stream input, int limit, bool allowTruncated) {
 		// 保证输入缓冲中有 RequiredInputMax 的余量（解码器可能超出读取）
 		while (_inLen - _inPos < RequiredInputMax && !_inputEnded) {
@@ -790,7 +792,9 @@ sealed class Lzma1Decoder {
 	///     热路径使用 <see cref="Unsafe.Add{T}(ref T, int)" /> 直接寻址数组元素，消除逐位边界检查；
 	///     索引不变式由距离上限检查（≤ 字典容量）与环回运算保证，与原生 liblzma 的裸指针行为一致。
 	///     符号起点保存在局部变量（仅异常回滚时回写字典位置），避免每符号字段写入。
+	///     标注 AggressiveOptimization：跳过分层编译直接生成 Tier1 代码（实测快约 2%）。
 	/// </summary>
+	[MethodImpl(MethodImplOptions.AggressiveOptimization)]
 	private void DecodeReal(int limit, int bufLimit) {
 		int lc = _lc;
 		var lpMask = _lpMask;
@@ -819,97 +823,75 @@ sealed class Lzma1Decoder {
 		try {
 			do {
 				symbolDicStart = _dicPos;
-			var posState = (processedPos & pbMask) << 4;
-			var probIndex = KStartOffset + IsMatch + (int)(posState + (uint)state);
-			if (DecodeBit(ref Unsafe.Add(ref probs, probIndex), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen) ==
-				0) {
-				int symbol;
-				probIndex = KStartOffset + Literal;
-				if (processedPos != 0 || checkDicSize != 0) {
-					probIndex += 3 * (((int)((processedPos << 8) + prevByte) & lpMask) << lc);
-				}
-
-				processedPos++;
-
-				if (state < KNumLitStates) {
-					state -= state < 4 ? state : 3;
-					symbol = 1;
-					for (var i = 0; i < 8; i++) {
-						var tb2 = DecodeBit(ref Unsafe.Add(ref probs, probIndex + symbol),
-							ref range,
-							ref code,
-							ref buf,
-							bufLimit,
-							ref inBuf,
-							inLen);
-						symbol = symbol << 1 | tb2;
-					}
-				} else {
-					uint matchByte = Unsafe.Add(ref dic, _dicPos - (int)rep0 + (_dicPos < rep0 ? dicBufSize : 0));
-					uint offs = 0x100;
-					state -= state < 10 ? 3 : 6;
-					symbol = 1;
-					for (var i = 0; i < 8; i++) {
-						matchByte += matchByte;
-						var bit = offs;
-						offs &= matchByte;
-						var b = DecodeBit(ref Unsafe.Add(ref probs, probIndex + (int)(offs + bit + (uint)symbol)),
-							ref range,
-							ref code,
-							ref buf,
-							bufLimit,
-							ref inBuf,
-							inLen);
-						symbol = symbol << 1 | b;
-						if (b == 0) {
-							offs ^= bit;
-						}
-					}
-				}
-
-				Unsafe.Add(ref dic, _dicPos++) = (byte)symbol;
-				prevByte = (uint)symbol;
-				continue;
-			}
-
-			probIndex = KStartOffset + IsRep + state;
-			if (DecodeBit(ref Unsafe.Add(ref probs, probIndex), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen) ==
-				0) {
-				state += KNumStates;
-				probIndex = KStartOffset + LenCoder;
-			} else {
-				probIndex = KStartOffset + IsRepG0 + state;
+				var posState = (processedPos & pbMask) << 4;
+				var probIndex = KStartOffset + IsMatch + (int)(posState + (uint)state);
 				if (DecodeBit(ref Unsafe.Add(ref probs, probIndex), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen) ==
 					0) {
-					probIndex = KStartOffset + IsRep0Long + (int)(posState + (uint)state);
-					if (DecodeBit(ref Unsafe.Add(ref probs, probIndex),
-						ref range,
-						ref code,
-						ref buf,
-						bufLimit,
-						ref inBuf,
-						inLen) == 0) {
-						Unsafe.Add(ref dic, _dicPos) =
-							Unsafe.Add(ref dic, _dicPos - (int)rep0 + (_dicPos < rep0 ? dicBufSize : 0));
-						_dicPos++;
-						processedPos++;
-						state = state < KNumLitStates ? 9 : 11;
-						prevByte = Unsafe.Add(ref dic, _dicPos - 1);
-						continue;
+					int symbol;
+					probIndex = KStartOffset + Literal;
+					if (processedPos != 0 || checkDicSize != 0) {
+						probIndex += 3 * (((int)((processedPos << 8) + prevByte) & lpMask) << lc);
 					}
-				} else {
-					uint distance;
-					probIndex = KStartOffset + IsRepG1 + state;
-					if (DecodeBit(ref Unsafe.Add(ref probs, probIndex),
-						ref range,
-						ref code,
-						ref buf,
-						bufLimit,
-						ref inBuf,
-						inLen) == 0) {
-						distance = rep1;
+
+					processedPos++;
+
+					if (state < KNumLitStates) {
+						state -= state < 4 ? state : 3;
+						symbol = 1;
+						for (var i = 0; i < 8; i++) {
+							var tb2 = DecodeBit(ref Unsafe.Add(ref probs, probIndex + symbol),
+								ref range,
+								ref code,
+								ref buf,
+								bufLimit,
+								ref inBuf,
+								inLen);
+							symbol = symbol << 1 | tb2;
+						}
 					} else {
-						probIndex = KStartOffset + IsRepG2 + state;
+						uint matchByte = Unsafe.Add(ref dic, _dicPos - (int)rep0 + (_dicPos < rep0 ? dicBufSize : 0));
+						uint offs = 0x100;
+						state -= state < 10 ? 3 : 6;
+						symbol = 1;
+						for (var i = 0; i < 8; i++) {
+							matchByte += matchByte;
+							var bit = offs;
+							offs &= matchByte;
+							var b = DecodeBit(ref Unsafe.Add(ref probs, probIndex + (int)(offs + bit + (uint)symbol)),
+								ref range,
+								ref code,
+								ref buf,
+								bufLimit,
+								ref inBuf,
+								inLen);
+							symbol = symbol << 1 | b;
+							if (b == 0) {
+								offs ^= bit;
+							}
+						}
+					}
+
+					Unsafe.Add(ref dic, _dicPos++) = (byte)symbol;
+					prevByte = (uint)symbol;
+					continue;
+				}
+
+				probIndex = KStartOffset + IsRep + state;
+				if (DecodeBit(ref Unsafe.Add(ref probs, probIndex), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen) ==
+					0) {
+					state += KNumStates;
+					probIndex = KStartOffset + LenCoder;
+				} else {
+					probIndex = KStartOffset + IsRepG0 + state;
+					if (DecodeBit(ref Unsafe.Add(ref probs, probIndex),
+							ref range,
+							ref code,
+							ref buf,
+							bufLimit,
+							ref inBuf,
+							inLen) ==
+						0) {
+						probIndex = KStartOffset + IsRep0Long + (int)(posState + (uint)state);
 						if (DecodeBit(ref Unsafe.Add(ref probs, probIndex),
 							ref range,
 							ref code,
@@ -917,55 +899,62 @@ sealed class Lzma1Decoder {
 							bufLimit,
 							ref inBuf,
 							inLen) == 0) {
-							distance = rep2;
-						} else {
-							distance = rep3;
-							rep3 = rep2;
+							Unsafe.Add(ref dic, _dicPos) =
+								Unsafe.Add(ref dic, _dicPos - (int)rep0 + (_dicPos < rep0 ? dicBufSize : 0));
+							_dicPos++;
+							processedPos++;
+							state = state < KNumLitStates ? 9 : 11;
+							prevByte = Unsafe.Add(ref dic, _dicPos - 1);
+							continue;
 						}
-
-						rep2 = rep1;
-					}
-
-					rep1 = rep0;
-					rep0 = distance;
-				}
-
-				state = state < KNumLitStates ? 8 : 11;
-				probIndex = KStartOffset + RepLenCoder;
-			}
-
-			// 长度解码
-			{
-				var probLenBase = probIndex;
-				if (DecodeBit(ref Unsafe.Add(ref probs, probLenBase + LenChoice),
-					ref range,
-					ref code,
-					ref buf,
-					bufLimit,
-					ref inBuf,
-					inLen) == 0) {
-					var probLen = probLenBase + LenLow + (int)posState;
-					len = 1;
-					for (var i = 0; i < KLenNumLowBits; i++) {
-						len = len << 1 | DecodeBit(ref Unsafe.Add(ref probs, probLen + len),
+					} else {
+						uint distance;
+						probIndex = KStartOffset + IsRepG1 + state;
+						if (DecodeBit(ref Unsafe.Add(ref probs, probIndex),
 							ref range,
 							ref code,
 							ref buf,
 							bufLimit,
 							ref inBuf,
-							inLen);
+							inLen) == 0) {
+							distance = rep1;
+						} else {
+							probIndex = KStartOffset + IsRepG2 + state;
+							if (DecodeBit(ref Unsafe.Add(ref probs, probIndex),
+								ref range,
+								ref code,
+								ref buf,
+								bufLimit,
+								ref inBuf,
+								inLen) == 0) {
+								distance = rep2;
+							} else {
+								distance = rep3;
+								rep3 = rep2;
+							}
+
+							rep2 = rep1;
+						}
+
+						rep1 = rep0;
+						rep0 = distance;
 					}
 
-					len -= 8;
-				} else {
-					if (DecodeBit(ref Unsafe.Add(ref probs, probLenBase + LenChoice2),
+					state = state < KNumLitStates ? 8 : 11;
+					probIndex = KStartOffset + RepLenCoder;
+				}
+
+				// 长度解码
+				{
+					var probLenBase = probIndex;
+					if (DecodeBit(ref Unsafe.Add(ref probs, probLenBase + LenChoice),
 						ref range,
 						ref code,
 						ref buf,
 						bufLimit,
 						ref inBuf,
 						inLen) == 0) {
-						var probLen = probLenBase + LenLow + (1 << KLenNumLowBits) + (int)posState;
+						var probLen = probLenBase + LenLow + (int)posState;
 						len = 1;
 						for (var i = 0; i < KLenNumLowBits; i++) {
 							len = len << 1 | DecodeBit(ref Unsafe.Add(ref probs, probLen + len),
@@ -976,210 +965,231 @@ sealed class Lzma1Decoder {
 								ref inBuf,
 								inLen);
 						}
+
+						len -= 8;
 					} else {
-						var probLen = probLenBase + LenHigh;
-						len = 1;
-						for (var i = 0; i < KLenNumHighBits; i++) {
-							len = len << 1 | DecodeBit(ref Unsafe.Add(ref probs, probLen + len),
+						if (DecodeBit(ref Unsafe.Add(ref probs, probLenBase + LenChoice2),
+							ref range,
+							ref code,
+							ref buf,
+							bufLimit,
+							ref inBuf,
+							inLen) == 0) {
+							var probLen = probLenBase + LenLow + (1 << KLenNumLowBits) + (int)posState;
+							len = 1;
+							for (var i = 0; i < KLenNumLowBits; i++) {
+								len = len << 1 | DecodeBit(ref Unsafe.Add(ref probs, probLen + len),
+									ref range,
+									ref code,
+									ref buf,
+									bufLimit,
+									ref inBuf,
+									inLen);
+							}
+						} else {
+							var probLen = probLenBase + LenHigh;
+							len = 1;
+							for (var i = 0; i < KLenNumHighBits; i++) {
+								len = len << 1 | DecodeBit(ref Unsafe.Add(ref probs, probLen + len),
+									ref range,
+									ref code,
+									ref buf,
+									bufLimit,
+									ref inBuf,
+									inLen);
+							}
+
+							len -= 1 << KLenNumHighBits;
+							len += KLenNumLowSymbols * 2;
+						}
+					}
+				}
+
+				if (state >= KNumStates) {
+					uint distance;
+					var probSlot = KStartOffset + PosSlot
+						+ (((uint)len < KNumLenToPosStates ? (int)(uint)len : KNumLenToPosStates - 1) << KNumPosSlotBits);
+					distance = 1;
+					for (var i = 0; i < KNumPosSlotBits; i++) {
+						distance = distance << 1 | (uint)DecodeBit(ref Unsafe.Add(ref probs, probSlot + (int)distance),
+							ref range,
+							ref code,
+							ref buf,
+							bufLimit,
+							ref inBuf,
+							inLen);
+					}
+
+					distance -= 1 << KNumPosSlotBits;
+					if (distance >= KStartPosModelIndex) {
+						var posSlot = (int)distance;
+						var numDirectBits = (int)((distance >> 1) - 1);
+						distance = 2 | distance & 1;
+						if (posSlot < KEndPosModelIndex) {
+							distance <<= numDirectBits;
+							var prob = KStartOffset + SpecPos;
+							uint m = 1;
+							distance++;
+							while (--numDirectBits >= 0) {
+								var probIdx = prob + (int)distance;
+								ref var probRef = ref Unsafe.Add(ref probs, probIdx);
+								uint ttt = probRef;
+								Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
+								var bound = (range >> 11) * ttt;
+								if (code < bound) {
+									range = bound;
+									probRef = (ushort)(ttt + (KBitModelTotal - ttt >> KNumMoveBits));
+									Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
+									distance += m;
+									m += m;
+								} else {
+									code -= bound;
+									range -= bound;
+									probRef = (ushort)(ttt - (ttt >> KNumMoveBits));
+									Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
+									m += m;
+									distance += m;
+								}
+							}
+
+							distance -= m;
+						} else {
+							numDirectBits -= KNumAlignBits;
+							while (--numDirectBits >= 0) {
+								Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
+								range >>= 1;
+								code -= range;
+								var t = 0 - (code >> 31);
+								distance = (distance << 1) + t + 1;
+								code += range & t;
+							}
+
+							var prob = KStartOffset + Align;
+							uint i = 1;
+							// 反转解码 4 位（REV_BIT_CONST x3 + REV_BIT_LAST），
+							// 每次用累积的 i 作为概率索引
+							DecodeRevConst(ref Unsafe.Add(ref probs, prob + (int)i),
 								ref range,
 								ref code,
 								ref buf,
+								1,
+								ref i,
 								bufLimit,
 								ref inBuf,
 								inLen);
-						}
-
-						len -= 1 << KLenNumHighBits;
-						len += KLenNumLowSymbols * 2;
-					}
-				}
-			}
-
-			if (state >= KNumStates) {
-				uint distance;
-				var probSlot = KStartOffset + PosSlot
-					+ (((uint)len < KNumLenToPosStates ? (int)(uint)len : KNumLenToPosStates - 1) << KNumPosSlotBits);
-				distance = 1;
-				for (var i = 0; i < KNumPosSlotBits; i++) {
-					distance = distance << 1 | (uint)DecodeBit(ref Unsafe.Add(ref probs, probSlot + (int)distance),
-						ref range,
-						ref code,
-						ref buf,
-						bufLimit,
-						ref inBuf,
-						inLen);
-				}
-
-				distance -= 1 << KNumPosSlotBits;
-				if (distance >= KStartPosModelIndex) {
-					var posSlot = (int)distance;
-					var numDirectBits = (int)((distance >> 1) - 1);
-					distance = 2 | distance & 1;
-					if (posSlot < KEndPosModelIndex) {
-						distance <<= numDirectBits;
-						var prob = KStartOffset + SpecPos;
-						uint m = 1;
-						distance++;
-						while (--numDirectBits >= 0) {
-							var probIdx = prob + (int)distance;
-							ref var probRef = ref Unsafe.Add(ref probs, probIdx);
-							uint ttt = probRef;
-							Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
-							var bound = (range >> 11) * ttt;
-							if (code < bound) {
-								range = bound;
-								probRef = (ushort)(ttt + (KBitModelTotal - ttt >> KNumMoveBits));
-								Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
-								distance += m;
-								m += m;
-							} else {
-								code -= bound;
-								range -= bound;
-								probRef = (ushort)(ttt - (ttt >> KNumMoveBits));
-								Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
-								m += m;
-								distance += m;
+							DecodeRevConst(ref Unsafe.Add(ref probs, prob + (int)i),
+								ref range,
+								ref code,
+								ref buf,
+								2,
+								ref i,
+								bufLimit,
+								ref inBuf,
+								inLen);
+							DecodeRevConst(ref Unsafe.Add(ref probs, prob + (int)i),
+								ref range,
+								ref code,
+								ref buf,
+								4,
+								ref i,
+								bufLimit,
+								ref inBuf,
+								inLen);
+							DecodeRevLast(ref Unsafe.Add(ref probs, prob + (int)i),
+								ref range,
+								ref code,
+								ref buf,
+								ref i,
+								bufLimit,
+								ref inBuf,
+								inLen);
+							distance <<= KNumAlignBits;
+							distance |= i;
+							if (distance == 0xFFFFFFFF) {
+								len = KMatchSpecLenStart;
+								state -= KNumStates;
+								break;
 							}
 						}
+					}
 
-						distance -= m;
-					} else {
-						numDirectBits -= KNumAlignBits;
-						while (--numDirectBits >= 0) {
-							Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
-							range >>= 1;
-							code -= range;
-							var t = 0 - (code >> 31);
-							distance = (distance << 1) + t + 1;
-							code += range & t;
-						}
+					rep3 = rep2;
+					rep2 = rep1;
+					rep1 = rep0;
+					rep0 = distance + 1;
+					state = state < KNumStates + KNumLitStates ? KNumLitStates : KNumLitStates + 3;
+					var checkLimit = checkDicSize != 0
+						? checkDicSize
+						: Math.Max(processedPos, ExternalCheckDicSize);
+					// 距离上限取字典容量：保证环回索引始终在字典范围内（防御损坏数据越界）
+					if (checkLimit > (uint)dicBufSize) {
+						checkLimit = (uint)dicBufSize;
+					}
 
-						var prob = KStartOffset + Align;
-						uint i = 1;
-						// 反转解码 4 位（REV_BIT_CONST x3 + REV_BIT_LAST），
-						// 每次用累积的 i 作为概率索引
-						DecodeRevConst(ref Unsafe.Add(ref probs, prob + (int)i),
-							ref range,
-							ref code,
-							ref buf,
-							1,
-							ref i,
-							bufLimit,
-							ref inBuf,
-							inLen);
-						DecodeRevConst(ref Unsafe.Add(ref probs, prob + (int)i),
-							ref range,
-							ref code,
-							ref buf,
-							2,
-							ref i,
-							bufLimit,
-							ref inBuf,
-							inLen);
-						DecodeRevConst(ref Unsafe.Add(ref probs, prob + (int)i),
-							ref range,
-							ref code,
-							ref buf,
-							4,
-							ref i,
-							bufLimit,
-							ref inBuf,
-							inLen);
-						DecodeRevLast(ref Unsafe.Add(ref probs, prob + (int)i),
-							ref range,
-							ref code,
-							ref buf,
-							ref i,
-							bufLimit,
-							ref inBuf,
-							inLen);
-						distance <<= KNumAlignBits;
-						distance |= i;
-						if (distance == 0xFFFFFFFF) {
-							len = KMatchSpecLenStart;
-							state -= KNumStates;
-							break;
-						}
+					if (distance >= checkLimit) {
+						len += KMatchSpecLenErrorData + KMatchMinLen;
+						break;
 					}
 				}
 
-				rep3 = rep2;
-				rep2 = rep1;
-				rep1 = rep0;
-				rep0 = distance + 1;
-				state = state < KNumStates + KNumLitStates ? KNumLitStates : KNumLitStates + 3;
-				var checkLimit = checkDicSize != 0
-					? checkDicSize
-					: Math.Max(processedPos, ExternalCheckDicSize);
-				// 距离上限取字典容量：保证环回索引始终在字典范围内（防御损坏数据越界）
-				if (checkLimit > (uint)dicBufSize) {
-					checkLimit = (uint)dicBufSize;
-				}
+				len += KMatchMinLen;
 
-				if (distance >= checkLimit) {
-					len += KMatchSpecLenErrorData + KMatchMinLen;
-					break;
+				{
+					var rem = limit - _dicPos;
+					if (rem == 0) {
+						break;
+					}
+
+					var curLen = rem < len ? rem : len;
+					var pos = _dicPos - (int)rep0 + (_dicPos < rep0 ? dicBufSize : 0);
+
+					processedPos += (uint)curLen;
+					len -= curLen;
+					if (curLen <= dicBufSize - pos) {
+						var dest = _dicPos;
+						_dicPos += curLen;
+						if (rep0 >= (uint)curLen) {
+							// 区域不重叠：memmove 语义整段复制
+							Array.Copy(_dic, pos, _dic, dest, curLen);
+						} else if (rep0 == 1) {
+							// 距离 1：单字节重复（LZ77 传播语义 = 填充），SIMD 填充替代倍增复制
+							var b = Unsafe.Add(ref dic, pos);
+							_dic.AsSpan(dest, curLen).Fill(b);
+						} else {
+							// 重叠：先复制 rep0 字节的种子，再倍增复制覆盖剩余
+							Array.Copy(_dic, pos, _dic, dest, (int)rep0);
+							var copied = (int)rep0;
+							while (copied < curLen) {
+								var n = Math.Min(copied, curLen - copied);
+								Array.Copy(_dic, dest, _dic, dest + copied, n);
+								copied += n;
+							}
+						}
+					} else {
+						// 源区跨越字典环回边界：逐字节复制
+						for (var i = 0; i < curLen; i++) {
+							Unsafe.Add(ref dic, _dicPos++) = Unsafe.Add(ref dic, pos);
+							if (++pos == dicBufSize) {
+								pos = 0;
+							}
+						}
+					}
+
+					// 记录最后写入字节（字面上下文）
+					prevByte = Unsafe.Add(ref dic, (_dicPos == 0 ? dicBufSize : _dicPos) - 1);
 				}
+			} while (_dicPos < limit && buf < bufLimit);
+
+			if (buf < inLen) {
+				Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 			}
 
-			len += KMatchMinLen;
-
-			{
-				var rem = limit - _dicPos;
-				if (rem == 0) {
-					break;
-				}
-
-				var curLen = rem < len ? rem : len;
-				var pos = _dicPos - (int)rep0 + (_dicPos < rep0 ? dicBufSize : 0);
-
-				processedPos += (uint)curLen;
-				len -= curLen;
-				if (curLen <= dicBufSize - pos) {
-					var dest = _dicPos;
-					_dicPos += curLen;
-					if (rep0 >= (uint)curLen) {
-						// 区域不重叠：memmove 语义整段复制
-						Array.Copy(_dic, pos, _dic, dest, curLen);
-					} else if (rep0 == 1) {
-						// 距离 1：单字节重复（LZ77 传播语义 = 填充），SIMD 填充替代倍增复制
-						var b = Unsafe.Add(ref dic, pos);
-						_dic.AsSpan(dest, curLen).Fill(b);
-					} else {
-						// 重叠：先复制 rep0 字节的种子，再倍增复制覆盖剩余
-						Array.Copy(_dic, pos, _dic, dest, (int)rep0);
-						var copied = (int)rep0;
-						while (copied < curLen) {
-							var n = Math.Min(copied, curLen - copied);
-							Array.Copy(_dic, dest, _dic, dest + copied, n);
-							copied += n;
-						}
-					}
-				} else {
-					// 源区跨越字典环回边界：逐字节复制
-					for (var i = 0; i < curLen; i++) {
-						Unsafe.Add(ref dic, _dicPos++) = Unsafe.Add(ref dic, pos);
-						if (++pos == dicBufSize) {
-							pos = 0;
-						}
-					}
-				}
-
-				// 记录最后写入字节（字面上下文）
-				prevByte = Unsafe.Add(ref dic, (_dicPos == 0 ? dicBufSize : _dicPos) - 1);
+			// 与参考实现一致：匹配超出字典属于格式错误，抛出前写回字段（含 _remainLen ≥ ErrorData，
+			// 令后续调用以 EOF 终止流）；此处置于 try 内以统一回滚 _dicPos 到符号起点
+			if (len >= KMatchSpecLenErrorData) {
+				_remainLen = KMatchSpecLenErrorData;
+				throw new InnoFormatException("LZMA 数据错误（匹配超出字典）");
 			}
-		} while (_dicPos < limit && buf < bufLimit);
-
-		if (buf < inLen) {
-			Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
-		}
-
-		// 与参考实现一致：匹配超出字典属于格式错误，抛出前写回字段（含 _remainLen ≥ ErrorData，
-		// 令后续调用以 EOF 终止流）；此处置于 try 内以统一回滚 _dicPos 到符号起点
-		if (len >= KMatchSpecLenErrorData) {
-			_remainLen = KMatchSpecLenErrorData;
-			throw new InnoFormatException("LZMA 数据错误（匹配超出字典）");
-		}
 		} catch (InputEofException) {
 			// 符号未完成：回滚到符号起点（与 liblzma 的 LZMA_BUF_ERROR 行为一致）
 			_dicPos = symbolDicStart;

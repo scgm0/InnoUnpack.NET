@@ -30,11 +30,15 @@ sealed class Lzma2Stream : Stream {
 	private int _pendingLen;
 	private int _pendingPos;
 
+	/// <summary>复用限定读取范围包装（每 chunk 重置剩余量，避免每次解码分配）。</summary>
+	private readonly LimitedReadStream _limited;
+
 	/// <summary>
 	///     以 1 字节属性（字典大小编码，0-40）初始化。
 	/// </summary>
 	public Lzma2Stream(Stream input, byte prop) {
 		_input = input;
+		_limited = new(input, 0);
 		if (prop > 40) {
 			throw new InnoFormatException($"无效的 LZMA2 属性 {prop}");
 		}
@@ -164,8 +168,8 @@ sealed class Lzma2Stream : Stream {
 		// 复用输出缓冲（ArrayPool 租用，chunk 大小不同时按需扩容）
 		EnsurePendingCapacity(chunkUsize);
 
-		LimitedReadStream limited = new(_input, csize);
-		var n = _decoder.Decode(limited, _pending.AsSpan(0, chunkUsize), true);
+		_limited.Reset(csize);
+		var n = _decoder.Decode(_limited, _pending.AsSpan(0, chunkUsize), true);
 
 		_pendingLen = n;
 		_pendingPos = 0;
@@ -251,6 +255,9 @@ sealed class Lzma2Stream : Stream {
 	/// <summary>限制读取范围（最多 size 字节）的输入包装。</summary>
 	sealed private class LimitedReadStream(Stream input, int size) : Stream {
 		private int _remaining = size;
+
+		/// <summary>重置剩余读取量（chunk 间复用）。</summary>
+		public void Reset(int size) { _remaining = size; }
 
 		public override bool CanRead => true;
 		public override bool CanSeek => false;

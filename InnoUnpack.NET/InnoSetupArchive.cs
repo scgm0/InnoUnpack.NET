@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using InnoUnpack.NET.Compression;
 using InnoUnpack.NET.Metadata;
@@ -505,6 +506,8 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		ExtractionOptions options,
 		CancellationToken cancellationToken = default) {
 		var parallelism = options.MaxParallelism;
+		// 目录创建缓存：同一提取批次内已确认存在的目录跳过重复 CreateDirectory（15365 文件级联调用场景可省数万次 syscall）
+		var dirCache = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
 		if (parallelism <= 1 || groups.Count <= 1 || _sliceReaderFactory is null) {
 			// 串行路径（默认）：逐组顺序提取
 			long extracted = 0;
@@ -517,7 +520,8 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 					_slices,
 					parallel: false,
 					ref extracted,
-					ref filesExtracted);
+					ref filesExtracted,
+					dirCache);
 			}
 
 			return ((ulong)extracted, filesExtracted);
@@ -526,32 +530,38 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		// 并行路径：独立 chunk 组并发解码（每 worker 独立切片读取器与解码器）
 		long totalBytes = 0;
 		var totalFiles = 0;
-		Parallel.ForEachAsync(groups, new ParallelOptions {
-			MaxDegreeOfParallelism = parallelism,
-			CancellationToken = cancellationToken
-		}, (group, token) => {
-			var workerSlices = _sliceReaderFactory!();
-			try {
-				ExtractChunkGroup(group.Value,
-					outputRoot,
-					options,
-					token,
-					workerSlices,
-					parallel: true,
-					ref totalBytes,
-					ref totalFiles);
-			} finally {
-				workerSlices.Dispose();
-			}
+		Parallel.ForEachAsync(groups,
+			new ParallelOptions {
+				MaxDegreeOfParallelism = parallelism,
+				CancellationToken = cancellationToken
+			},
+			(group, token) => {
+				var workerSlices = _sliceReaderFactory!();
+				try {
+					ExtractChunkGroup(group.Value,
+						outputRoot,
+						options,
+						token,
+						workerSlices,
+						parallel: true,
+						ref totalBytes,
+						ref totalFiles,
+						dirCache);
+				} finally {
+					workerSlices.Dispose();
+				}
 
-			return ValueTask.CompletedTask;
-		}).GetAwaiter().GetResult();
+				return ValueTask.CompletedTask;
+			}).GetAwaiter().GetResult();
 
 		return ((ulong)totalBytes, totalFiles);
 	}
 
-	/// <summary>提取单个 chunk 组内的全部文件（组内顺序与数据偏移一致）。</summary>
-	/// <param name="parallel">并行模式：进度累计使用原子操作（组间交错报告，绝对累计值精确）。</param>
+	/// <summary>
+	///     提取单个 chunk 组内的全部文件（组内顺序与数据偏移一致）。
+	///     并行模式进度累计使用原子操作（组间交错报告，绝对累计值精确）；
+	///     <paramref name="dirCache" /> 为同一提取批次共享的目录创建缓存（线程安全）。
+	/// </summary>
 	private void ExtractChunkGroup(
 		List<InnoArchiveFile> chunkFiles,
 		string outputRoot,
@@ -560,7 +570,8 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		SliceReader slices,
 		bool parallel,
 		ref long extracted,
-		ref int filesExtracted) {
+		ref int filesExtracted,
+		ConcurrentDictionary<string, byte> dirCache) {
 		var chunk = ChunkReader.Open(slices, chunkFiles[0].DataEntry, _crypto);
 		var chunkStream = chunk.Stream;
 		long chunkPos = 0;
@@ -593,7 +604,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 					continue;
 				}
 
-				EnsureParentDirectory(target);
+				EnsureParentDirectory(target, dirCache);
 
 				if (File.Exists(target) && !options.Overwrite) {
 					AddProgress(options, parallel, ref extracted, ref filesExtracted, (long)file.Size, 1, file.Path);
@@ -685,10 +696,16 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	static private bool ShouldSkipTemporary(InnoArchiveFile file, ExtractionOptions options) =>
 		!options.ExtractTemporaryFiles && (file.Options & InnoFileOptions.DeleteAfterInstall) != 0;
 
-	static private void EnsureParentDirectory(string target) {
+	static private void EnsureParentDirectory(string target, ConcurrentDictionary<string, byte> dirCache) {
 		var dir = Path.GetDirectoryName(target)
 			?? throw new InnoFormatException($"无法解析目标路径：{target}");
+		// 目录已确认存在（本批次创建过）则跳过 CreateDirectory（省去重复 stat/mkdir syscall）
+		if (dirCache.ContainsKey(dir)) {
+			return;
+		}
+
 		Directory.CreateDirectory(dir);
+		dirCache.TryAdd(dir, 0);
 	}
 
 	static private void SetTimestamp(string target, DateTime timestamp, ExtractionOptions options) {
