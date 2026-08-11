@@ -4,7 +4,7 @@
         <TargetFramework>net10.0</TargetFramework>
         <LangVersion>latest</LangVersion>
         <PackageId>InnoUnpack.NET</PackageId>
-        <Version>1.0.0</Version>
+        <Version>1.0.1</Version>
         <Authors>InnoUnpack.NET contributors</Authors>
         <Description>跨平台的 Inno Setup 安装包解压库（.NET 10）</Description>
         <PackageTags>inno-setup;extractor;archive;compression;lzma</PackageTags>
