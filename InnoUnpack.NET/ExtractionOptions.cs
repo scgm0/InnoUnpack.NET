@@ -7,7 +7,7 @@ public sealed class ExtractionOptions {
 	/// <summary>是否保留文件时间戳（默认 true）。</summary>
 	public bool PreserveTimestamps { get; set; } = true;
 
-	/// <summary>是否校验文件校验和（MD5/SHA1/SHA256，默认 true）。</summary>
+	/// <summary>是否校验文件校验和（MD5/SHA1/SHA256/CRC32/Adler32，默认 true）。</summary>
 	public bool VerifyChecksums { get; set; } = true;
 
 	/// <summary>是否创建目录表中的目录条目（默认 true）。</summary>

@@ -4,7 +4,7 @@ sealed class SkipException(string message) : Exception(message);
 
 /// <summary>
 ///     测试用共享数据（真实 Inno Setup 安装包样本）。
-///     通过 tools/download-fixtures.sh 下载，不入库。
+///     通过 tools/download-fixtures.sh（Windows: tools/download-fixtures.ps1）下载，不入库。
 /// </summary>
 static class Fixtures {
 
@@ -30,7 +30,7 @@ static class Fixtures {
 				dir = dir.Parent;
 			}
 
-			throw new FileNotFoundException("未找到 Fixtures 目录，请先运行 tools/download-fixtures.sh");
+			throw new FileNotFoundException("未找到 Fixtures 目录，请先运行 tools/download-fixtures.sh（Windows: tools/download-fixtures.ps1）");
 		}
 	}
 
@@ -41,7 +41,7 @@ static class Fixtures {
 	/// <summary>缺少样本时跳过测试。</summary>
 	public static IDisposable SkipIfMissing(string fixture) {
 		if (!Exists(fixture)) {
-			throw new SkipException($"缺少样本 {fixture}，请运行 tools/download-fixtures.sh");
+			throw new SkipException($"缺少样本 {fixture}，请运行 tools/download-fixtures.sh（Windows: tools/download-fixtures.ps1）");
 		}
 
 		return NullScope.Instance;

@@ -4,7 +4,7 @@ using InnoUnpack.NET.Compression;
 namespace InnoUnpack.Tests;
 
 /// <summary>
-///     自研 bzip2 解码器测试（压缩向量由系统 bzip2 1.0.8 生成）。
+///     自定义 bzip2 解码器测试（压缩向量由系统 bzip2 1.0.8 生成）。
 /// </summary>
 public class BZip2Tests {
 	[Fact]

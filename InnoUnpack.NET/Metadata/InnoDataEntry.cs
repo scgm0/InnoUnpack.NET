@@ -41,7 +41,7 @@ public sealed class InnoDataEntry {
 	/// <summary>签名模式（6.3.x）。</summary>
 	public InnoSignMode Sign { get; internal set; } = InnoSignMode.NoSetting;
 
-	/// <summary>校验和类型与数据（MD5 / SHA1 / SHA256 / CRC32）。</summary>
+	/// <summary>校验和类型与数据（MD5 / SHA1 / SHA256 / CRC32 / Adler32）。</summary>
 	public InnoChecksum Checksum { get; internal set; } = InnoChecksum.None;
 
 	/// <summary>文件时间戳（UTC）。</summary>

@@ -170,7 +170,7 @@ public class CryptoAlgorithmTests {
 		Assert.NotNull(crypto);
 	}
 
-	/// <summary>测试用：通过反射构造 InnoCrypto（内部构造函数私有）。</summary>
+	/// <summary>测试用：InnoCrypto 构造函数非公开，通过反射构造实例。</summary>
 	sealed private class InnoCryptoForTest {
 		private readonly object _crypto;
 		private readonly MethodInfo _wrap;

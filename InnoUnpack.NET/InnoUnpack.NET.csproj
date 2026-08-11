@@ -27,6 +27,7 @@
 
     <ItemGroup>
         <InternalsVisibleTo Include="InnoUnpack.Tests"/>
+        <InternalsVisibleTo Include="InnoUnpack.Bench"/>
     </ItemGroup>
 
 </Project>

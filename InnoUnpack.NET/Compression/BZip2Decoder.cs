@@ -433,14 +433,18 @@ sealed class BZip2Decoder(Stream input) {
 		}
 	}
 
-	/// <summary>MSB-first 位读取器（bzip2 位序）。</summary>
+	/// <summary>MSB-first 位读取器（bzip2 位序，块缓冲避免逐字节 ReadByte）。</summary>
 	sealed private class BitReader(Stream stream) {
+		private const int BufferSize = 8192;
+		private readonly byte[] _data = new byte[BufferSize];
 		private int _bitCount;
 		private uint _buffer;
+		private int _pos;
+		private int _len;
 
 		public bool ReadBit() {
 			if (_bitCount == 0) {
-				var b = stream.ReadByte();
+				var b = NextByte();
 				if (b < 0) {
 					throw new InnoFormatException("bzip2 数据意外结束");
 				}
@@ -451,6 +455,19 @@ sealed class BZip2Decoder(Stream input) {
 
 			_bitCount--;
 			return (_buffer >> _bitCount & 1) != 0;
+		}
+
+		/// <summary>从缓冲读取下一个字节；流结束返回 -1。</summary>
+		private int NextByte() {
+			if (_pos == _len) {
+				_len = stream.Read(_data);
+				_pos = 0;
+				if (_len <= 0) {
+					return -1;
+				}
+			}
+
+			return _data[_pos++];
 		}
 
 		public uint ReadBits(int count) {

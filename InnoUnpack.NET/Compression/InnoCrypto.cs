@@ -9,7 +9,7 @@ namespace InnoUnpack.NET.Compression;
 ///     安装包加密上下文：密码校验、密钥派生与 chunk 解密流组装。
 ///     支持 ARC4+MD5（4.2.2–5.3.8）、ARC4+SHA1（5.3.9–6.3.x）、XChaCha20（6.4.0+）。
 ///     密钥派生与 nonce 生成依据 Inno Setup 格式规范实现
-///     （XChaCha20 nonce 的 chunk 偏移/切片异或参考 InnoUnpacker，MIT License，的 Extract6400.pas）。
+///     （XChaCha20 nonce 的 chunk 偏移/切片异或参考 InnoUnpacker（MIT License）的 Extract6400.pas）。
 /// </summary>
 sealed class InnoCrypto {
 	private readonly byte[] _encodedPassword;

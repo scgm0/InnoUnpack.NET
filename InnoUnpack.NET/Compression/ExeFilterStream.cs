@@ -3,8 +3,8 @@ namespace InnoUnpack.NET.Compression;
 /// <summary>
 ///     反转 Inno Setup 的"调用指令优化"（Call Instruction Optimizer，4.1.8+ 默认启用）：
 ///     将存储的 x86 CALL/JMP 指令地址还原为相对偏移。
-///     4108 逻辑参考 InnoUnpacker（MIT License）的 CallOptimizer.pas 解码分支；
-///     5200/5309 变体依据 Inno Setup 5.2.0+ 的格式行为独立实现。
+///     Legacy（4.1.8 – 5.1.x）逻辑参考 InnoUnpacker（MIT License）的 CallOptimizer.pas 解码分支；
+///     Blocked / BlockedFlip 变体依据 Inno Setup 5.2.0+ 的格式行为独立实现。
 /// </summary>
 sealed class ExeFilterStream : Stream {
 
@@ -22,6 +22,11 @@ sealed class ExeFilterStream : Stream {
 	// Blocked（5.2.0+）状态
 	private long _bytesRead;
 	private uint _decodedAddress;
+
+	// Blocked 模式内部读取缓冲（避免逐字节 ReadByte 虚拟调用）
+	private readonly byte[] _blockedBuffer = new byte[4096];
+	private int _blockedBufferLen;
+	private int _blockedBufferPos;
 
 	// Legacy（4.1.8 – 5.1.x）状态
 	private long _fileOffset = InstructionSize; // 当前字节偏移 + 指令大小（可回绕）
@@ -108,12 +113,18 @@ sealed class ExeFilterStream : Stream {
 
 		while (!output.IsEmpty) {
 			if (_addressBytesPending == 0) {
-				var b = _inner.ReadByte();
-				if (b < 0) {
-					break;
+				if (_blockedBufferPos == _blockedBufferLen) {
+					var n = _inner.Read(_blockedBuffer);
+					if (n <= 0) {
+						break;
+					}
+
+					_blockedBufferPos = 0;
+					_blockedBufferLen = n;
 				}
 
-				output[0] = (byte)b;
+				var b = _blockedBuffer[_blockedBufferPos++];
+				output[0] = b;
 				output = output[1..];
 				written++;
 				_bytesRead++;
@@ -131,9 +142,20 @@ sealed class ExeFilterStream : Stream {
 				_addressBytesPending = -4;
 			}
 
-			// 读取 4 个地址字节（低字节在前）
+			// 读取 4 个地址字节（低字节在前）：优先消费内部缓冲，再读底层流
 			var toRead = -_addressBytesPending;
-			var got = _inner.Read(_addressBuffer.AsSpan(4 + _addressBytesPending, toRead));
+			var got = 0;
+			var available = _blockedBufferLen - _blockedBufferPos;
+			if (available > 0) {
+				got = Math.Min(toRead, available);
+				_blockedBuffer.AsSpan(_blockedBufferPos, got).CopyTo(_addressBuffer.AsSpan(4 + _addressBytesPending, got));
+				_blockedBufferPos += got;
+			}
+
+			if (got < toRead) {
+				got += _inner.Read(_addressBuffer.AsSpan(4 + _addressBytesPending + got, toRead - got));
+			}
+
 			if (got <= 0) {
 				var remaining = 4 + _addressBytesPending;
 				if (remaining > 0) {

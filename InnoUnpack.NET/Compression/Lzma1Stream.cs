@@ -9,6 +9,8 @@
 
 namespace InnoUnpack.NET.Compression;
 
+using System.Buffers;
+
 /// <summary>
 ///     流式 LZMA1 解码器（无结束标记、输出大小未知）。
 ///     输入流以 5 字节属性头开始（lc/lp/pb + 字典大小），随后为 LZMA 码流。
@@ -24,6 +26,7 @@ sealed class Lzma1Stream : Stream {
 	private bool _disposed;
 	private bool _eof;
 	private byte[] _pending = Array.Empty<byte>();
+	private bool _pendingRented;
 	private int _pendingLen;
 	private int _pendingPos;
 
@@ -67,9 +70,14 @@ sealed class Lzma1Stream : Stream {
 				return 0;
 			}
 
-			// 复用解码缓冲，避免每次 Decode 分配 256KB
+			// 复用解码缓冲（ArrayPool 租用），避免每次 Decode 分配 256KB
 			if (_pending.Length < ChunkSize) {
-				_pending = new byte[ChunkSize];
+				if (_pendingRented) {
+					ArrayPool<byte>.Shared.Return(_pending);
+				}
+
+				_pending = ArrayPool<byte>.Shared.Rent(ChunkSize);
+				_pendingRented = true;
 			}
 
 			var n = _decoder.Decode(_input, _pending, _allowTruncated);
@@ -104,6 +112,12 @@ sealed class Lzma1Stream : Stream {
 			_disposed = true;
 			if (disposing) {
 				_input.Dispose();
+				_decoder.Dispose();
+				if (_pendingRented) {
+					ArrayPool<byte>.Shared.Return(_pending);
+					_pendingRented = false;
+					_pending = Array.Empty<byte>();
+				}
 			}
 		}
 

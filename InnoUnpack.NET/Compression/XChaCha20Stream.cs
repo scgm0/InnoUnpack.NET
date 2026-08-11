@@ -4,7 +4,7 @@ namespace InnoUnpack.NET.Compression;
 ///     XChaCha20 流解密器（Inno Setup 6.4.0+ 的加密 chunk）。
 ///     基于 RFC 8439 ChaCha20 块函数与 XChaCha20 草案的 HChaCha20 子密钥派生；
 ///     8 字节 nonce 布局（state[13]=0、state[14..15]=nonce）为 Inno Setup 格式事实
-///     （参考 InnoUnpacker，MIT License，的 ChaCha20.pas）。
+///     （参考 InnoUnpacker（MIT License）的 ChaCha20.pas）。
 ///     counter 从 0 开始。
 /// </summary>
 sealed class XChaCha20Stream : Stream {

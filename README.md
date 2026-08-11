@@ -1,6 +1,6 @@
 # InnoUnpack.NET
 
-跨平台、纯托管的 [Inno Setup](https://jrsoftware.org/isinfo.php) 安装包解压库（.NET 10，**零 NuGet 依赖**）。
+跨平台、纯C#的 [Inno Setup](https://jrsoftware.org/isinfo.php) 安装包解压库（.NET 10，**零 NuGet 依赖**）。
 
 [![NuGet](https://img.shields.io/nuget/v/InnoUnpack.NET)](https://www.nuget.org/packages/InnoUnpack.NET)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -8,7 +8,7 @@
 ## 功能
 
 - 支持 **Inno Setup 4.0 – 7.x**（ANSI 与 Unicode，含 6.5.0+ 新版偏移表布局）
-- 全部压缩算法自研实现：`stored` / `zlib` / `bzip2` / `LZMA1` / `LZMA2`（无第三方依赖）
+- 压缩算法全覆盖：`stored` / `zlib` / `bzip2` / `LZMA1` / `LZMA2`（`bzip2` 自定义实现，`LZMA1`/`LZMA2` 移植自 LZMA SDK（Public Domain），`zlib` 使用 .NET 内置，零第三方依赖）
 - 加密安装包解密：
   - ARC4 + MD5（4.2.2 – 5.3.8）
   - ARC4 + SHA1（5.3.9 – 6.3.x）
@@ -98,11 +98,82 @@ archive.ExtractToDirectory("output");
 
 ## 支持范围
 
-- 平台：.NET 10（跨平台，Windows / Linux / macOS）
-- **依赖：零**（全部压缩与加密算法自研实现）
+- 平台：.NET 10（跨平台，Windows / Linux）
+- **依赖：零**（无 NuGet 依赖；`bzip2` 与加密算法自定义实现，`LZMA1`/`LZMA2` 移植自 LZMA SDK，`zlib` 使用 .NET 内置）
+- **NativeAOT 兼容**（无反射，可 `PublishAot=true` 发布为原生二进制）
 - 已知限制：
   - 5.x+ 安装包的卸载程序（UninstExe）数据由安装器运行时生成，不包含在包内（不提取）
   - 加密安装包的 6.5.0+ 解密支持经过算法级验证，但尚未经真实加密样本端到端验证
+
+## 性能
+
+### 与 innoextract 对比（同等条件）
+
+同一文件集（排除 innoextract 默认跳过的卸载程序）、关闭校验和与时间戳、相同输出目录、
+**best-of-7**。测试机：i5-9300H，Linux，测试夹具为 Inno Setup 官方安装器（innoextract 1.9
+仅支持到 Inno Setup 6.0.5，故可对比 3 个）：
+
+| fixture | 大小 | innoextract | 本库 JIT（冷进程） | 本库 JIT（热路径） | 本库 AOT-Speed（冷进程） |
+| --- | --- | --- | --- | --- | --- |
+| isetup-4.2.7.exe（LZMA1） | 2.9 MiB | 41 ms | 130 ms | 84 ms | **86 ms** |
+| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB | 87 ms | 168 ms | 114 ms | **117 ms** |
+| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB | 96 ms | 156 ms | 112 ms | **114 ms** |
+
+- **热路径（库场景，进程内预热）**：与 innoextract 差距约 **1.2–2.1x**，剩余差距来自
+  纯托管 LZMA 位解码器 vs liblzma 的原生标量代码（LZMA range coder 为串行位依赖，双方均无 SIMD）
+- **冷进程（CLI 场景）**：AOT 消除了 JIT 编译开销（约 40–50 ms），AOT-Speed 冷启动与
+  JIT 热路径基本持平
+
+### AOT（NativeAOT）三种 OptimizationPreference
+
+`dotnet publish tools/bench -c Release -r linux-x64 -p:PublishAot=true -p:OptimizationPreference=<模式>`，
+冷进程单次提取（同等条件，best-of-7）：
+
+| fixture | Default | Speed | Size |
+| --- | --- | --- | --- |
+| isetup-4.2.7.exe | 116 ms | **86 ms** | 116 ms |
+| innosetup-5.5.9-unicode.exe | 154 ms | **117 ms** | 157 ms |
+| innosetup-5.6.1-unicode.exe | 151 ms | **114 ms** | 153 ms |
+
+`OptimizationPreference=Speed` 耗时为 Default/Size 的 **0.74–0.76 倍**（快约 32–35%）；
+热路径下 AOT-Speed 与 JIT 持平，Default/Size 约慢 30% 左右（JIT 分层编译对热点循环生成更好的代码）。
+原生二进制约 3 MB，无运行时依赖。
+
+### 本库全量提取（公共 API 默认选项，含 SHA256 校验，best-of-3）
+
+| fixture | 大小 | JIT | AOT-Speed |
+| --- | --- | --- | --- |
+| isetup-4.2.7.exe（LZMA1） | 3.0 MiB | 101 ms | 93 ms |
+| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB | 130 ms | 120 ms |
+| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB | 121 ms | 116 ms |
+| innosetup-6.7.3.exe（LZMA2） | 27.6 MiB | 588 ms | 614 ms |
+| innosetup-7.0.2-x64.exe（LZMA2） | 49.0 MiB | 1056 ms | 1087 ms |
+
+### 内存
+
+- 解码器字典/概率表/输入输出缓冲全部经 `ArrayPool` 租用并在流销毁时归还：**大缓冲零分配、
+  提取全程 GC 零收集**（gc0/gc1/gc2 均为 0 次）；池预热后单次提取仅约 0.6 MiB 小对象分配
+- 文件写出使用 `RandomAccess` 直接 OS 写入，无 FileStream 内部缓冲分配
+
+### 复现
+
+```bash
+# 工具与脚本位于 tools/bench
+bash tools/bench/compare.sh <fixtures-dir>   # 自动发布 AOT×3 并输出全部对比表
+```
+
+Windows 对应版本（PowerShell 5.1+/7 均可）：
+
+```powershell
+tools\bench\compare.cmd [fixtures-dir]      # 快捷入口（自动选择 pwsh / powershell）
+powershell -ExecutionPolicy Bypass -File tools\bench\compare.ps1 [-FixturesDir <dir>]
+```
+
+测试样本下载（Windows 下运行 `dotnet test` 前需要）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\download-fixtures.ps1
+```
 
 ## 许可证
 

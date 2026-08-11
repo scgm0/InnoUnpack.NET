@@ -12,6 +12,8 @@
 
 namespace InnoUnpack.NET.Compression;
 
+using System.Buffers;
+
 /// <summary>
 ///     原始 LZMA2 流解码器（Inno Setup 的块数据格式）。
 /// </summary>
@@ -24,6 +26,7 @@ sealed class Lzma2Stream : Stream {
 	private bool _eof;
 	private byte _lastProp;
 	private byte[] _pending = [];
+	private bool _pendingRented;
 	private int _pendingLen;
 	private int _pendingPos;
 
@@ -69,9 +72,6 @@ sealed class Lzma2Stream : Stream {
 		var count = Math.Min(_pendingLen - _pendingPos, buffer.Length);
 		_pending.AsSpan(_pendingPos, count).CopyTo(buffer);
 		_pendingPos += count;
-		if (_pendingPos == _pendingLen) {
-			_pending = [];
-		}
 
 		return count;
 	}
@@ -96,14 +96,14 @@ sealed class Lzma2Stream : Stream {
 				throw new InnoFormatException("LZMA2 数据意外结束");
 			}
 
-			_pending = new byte[usize];
-			ReadExact(_pending);
+			EnsurePendingCapacity(usize);
+			ReadExact(_pending.AsSpan(0, usize));
 			_pendingLen = usize;
 			_pendingPos = 0;
 			_dictValid += usize;
 			// 未压缩数据写入 LZMA 窗口（匹配可引用）
 			_decoder ??= NewDecoder(0);
-			_decoder.WriteUncompressed(_pending);
+			_decoder.WriteUncompressed(_pending.AsSpan(0, usize));
 			return true;
 		}
 
@@ -138,11 +138,18 @@ sealed class Lzma2Stream : Stream {
 
 		if (dictReset || _decoder == null) {
 			// 0xE0+：新 props + 全部重置（含字典）
-			_decoder = NewDecoder(_lastProp);
+			if (_decoder is null) {
+				_decoder = NewDecoder(_lastProp);
+			} else {
+				// 复用字典与概率数组，避免每次字典重置重新分配数 MB 缓冲
+				_decoder.ResetWithProps(_lastProp);
+				_decoder.ResetDictionary();
+			}
+
 			_dictValid = 0;
 		} else if (newProps) {
 			// 0xC0-0xDF：新 props + 状态重置（字典保留）
-			_decoder = NewDecoder(_lastProp);
+			_decoder.ResetWithProps(_lastProp);
 		} else if (stateReset) {
 			// 0xA0-0xBF：仅状态重置（概率模型 + range coder）
 			_decoder.ResetState();
@@ -154,13 +161,11 @@ sealed class Lzma2Stream : Stream {
 		_decoder.ResetInput();
 		_decoder.ExternalCheckDicSize = (uint)Math.Min(_dictValid, uint.MaxValue);
 
-		// 复用输出缓冲（chunk 大小不同时按需扩容）
-		if (_pending.Length < chunkUsize) {
-			_pending = new byte[chunkUsize];
-		}
+		// 复用输出缓冲（ArrayPool 租用，chunk 大小不同时按需扩容）
+		EnsurePendingCapacity(chunkUsize);
 
 		LimitedReadStream limited = new(_input, csize);
-		var n = _decoder.Decode(limited, _pending, true);
+		var n = _decoder.Decode(limited, _pending.AsSpan(0, chunkUsize), true);
 
 		_pendingLen = n;
 		_pendingPos = 0;
@@ -194,16 +199,30 @@ sealed class Lzma2Stream : Stream {
 		return a << 8 | b;
 	}
 
-	private void ReadExact(byte[] buffer) {
+	private void ReadExact(Span<byte> buffer) {
 		var offset = 0;
 		while (offset < buffer.Length) {
-			var n = _input.Read(buffer, offset, buffer.Length - offset);
+			var n = _input.Read(buffer[offset..]);
 			if (n <= 0) {
 				throw new InnoFormatException("LZMA2 数据意外结束");
 			}
 
 			offset += n;
 		}
+	}
+
+	/// <summary>确保输出缓冲容量（ArrayPool 租用并按需扩容，避免每 chunk 分配）。</summary>
+	private void EnsurePendingCapacity(int required) {
+		if (_pending.Length >= required) {
+			return;
+		}
+
+		if (_pendingRented) {
+			ArrayPool<byte>.Shared.Return(_pending);
+		}
+
+		_pending = ArrayPool<byte>.Shared.Rent(required);
+		_pendingRented = true;
 	}
 
 	public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
@@ -217,6 +236,12 @@ sealed class Lzma2Stream : Stream {
 			_disposed = true;
 			if (disposing) {
 				_input.Dispose();
+				_decoder?.Dispose();
+				if (_pendingRented) {
+					ArrayPool<byte>.Shared.Return(_pending);
+					_pendingRented = false;
+					_pending = [];
+				}
 			}
 		}
 

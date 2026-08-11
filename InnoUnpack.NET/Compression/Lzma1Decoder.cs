@@ -10,6 +10,10 @@
 
 namespace InnoUnpack.NET.Compression;
 
+using System.Buffers;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
 /// <summary>
 ///     流式 LZMA1 解码器（无结束标记、输出大小未知）。
 ///     输入流以 5 字节属性头开始（lc/lp/pb + 字典大小），随后为 LZMA 码流。
@@ -63,19 +67,24 @@ sealed class Lzma1Decoder {
 	private const int LenChoice2 = LenLow + (1 << KLenNumLowBits);
 
 	private const int DummyInputEof = -1;
-	private readonly byte[] _dic;
+
+	// 大缓冲由 ArrayPool 租用并在 Dispose 归还（池预热后整包提取期间无 GC 收集）
+	private byte[] _dic;
 	private readonly int _dicBufSize;
 
-	private readonly byte[] _inBuf = new byte[256 * 1024];
+	private byte[] _inBuf;
+	private bool _dicRented;
+	private bool _probsRented;
+	private bool _inBufRented;
 
-	private readonly byte _lc;
-	private readonly byte _lp;
-	private readonly int _lpMask;
-	private readonly byte _pb;
-	private readonly uint _pbMask;
+	private byte _lc;
+	private byte _lp;
+	private int _lpMask;
+	private byte _pb;
+	private uint _pbMask;
 
 	// ---------- 解码器状态 ----------
-	private readonly ushort[] _probs;
+	private ushort[] _probs;
 	private readonly uint _propDicSize;
 	private uint _checkDicSize;
 	private uint _code;
@@ -125,12 +134,33 @@ sealed class Lzma1Decoder {
 			_dicBufSize = (int)dicSize;
 		}
 
-		_dic = new byte[_dicBufSize];
+		_dic = ArrayPool<byte>.Shared.Rent(_dicBufSize);
+		_dicRented = true;
 
 		var numProbs = NumBaseProbs + (LzmaLitSize << _lc + _lp);
-		_probs = new ushort[numProbs];
-		for (var i = 0; i < numProbs; i++) {
-			_probs[i] = (ushort)(KBitModelTotal >> 1);
+		_probs = ArrayPool<ushort>.Shared.Rent(numProbs);
+		_probsRented = true;
+		Array.Fill(_probs, (ushort)(KBitModelTotal >> 1));
+
+		_inBuf = ArrayPool<byte>.Shared.Rent(256 * 1024);
+		_inBufRented = true;
+	}
+
+	/// <summary>归还 ArrayPool 租用的字典/概率/输入缓冲（流销毁时调用，幂等）。</summary>
+	public void Dispose() {
+		if (_dicRented) {
+			ArrayPool<byte>.Shared.Return(_dic);
+			_dicRented = false;
+		}
+
+		if (_probsRented) {
+			ArrayPool<ushort>.Shared.Return(_probs);
+			_probsRented = false;
+		}
+
+		if (_inBufRented) {
+			ArrayPool<byte>.Shared.Return(_inBuf);
+			_inBufRented = false;
 		}
 	}
 
@@ -156,12 +186,12 @@ sealed class Lzma1Decoder {
 	}
 
 	/// <summary>
-	///     范围解码器标准化。输入越过真实缓冲边界（<see cref="_inLen" />）时：
+	///     范围解码器标准化。输入越过真实缓冲边界（<paramref name="inLen" />）时：
 	///     截断模式（bufLimit 为 int.MaxValue）用 0xFF 填充，否则抛出 <see cref="InputEofException" />。
 	/// </summary>
-	private void Normalize(ref uint range, ref uint code, ref int buf, int bufLimit) {
+	private void Normalize(ref uint range, ref uint code, ref int buf, int bufLimit, ref byte inBuf, int inLen) {
 		if (range < KTopValue) {
-			if (buf >= _inLen) {
+			if (buf >= inLen) {
 				if (bufLimit == int.MaxValue) {
 					// 截断模式：0xFF 填充（不消费输入）。range 同样左移，避免 range 停滞
 					range <<= 8;
@@ -173,14 +203,17 @@ sealed class Lzma1Decoder {
 			}
 
 			range <<= 8;
-			code = code << 8 | _inBuf[buf++];
+			code = code << 8 | Unsafe.Add(ref inBuf, buf++);
 		}
 	}
 
-	/// <summary>解码一位并更新概率模型（对应 IF_BIT_0 / UPDATE_0 / UPDATE_1）。</summary>
-	private int DecodeBit(ref ushort prob, ref uint range, ref uint code, ref int buf, int bufLimit) {
+	/// <summary>
+	///     解码一位并更新概率模型（对应 IF_BIT_0 / UPDATE_0 / UPDATE_1）。
+	///     bound 分支对真实数据预测良好（概率模型收敛后方向稳定），实测优于算术选择（cmov）形式。
+	/// </summary>
+	private int DecodeBit(ref ushort prob, ref uint range, ref uint code, ref int buf, int bufLimit, ref byte inBuf, int inLen) {
 		uint ttt = prob;
-		Normalize(ref range, ref code, ref buf, bufLimit);
+		Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 		var bound = (range >> 11) * ttt;
 		if (code < bound) {
 			range = bound;
@@ -197,8 +230,61 @@ sealed class Lzma1Decoder {
 	/// <summary>仅重新初始化 range coder（LZMA2 连续 chunk 之间），不重置概率模型与状态。</summary>
 	internal void ResetRangeOnly() { _remainLen = KMatchSpecLenStart + 1; }
 
-	/// <summary>重置解码状态（概率模型、匹配位置、range coder），保留字典内容（LZMA2 state reset）。</summary>
-	internal void ResetState() { _remainLen = KMatchSpecLenStart + 2; }
+	/// <summary>
+	///     重置解码状态（概率模型、匹配位置、range coder），保留字典内容（LZMA2 state reset）。
+	///     概率模型重置使用向量化的 <see cref="System.Array.Fill{T}(T[], T)" />。
+	/// </summary>
+	internal void ResetState() {
+		Array.Fill(_probs, (ushort)(KBitModelTotal >> 1));
+		_rep0 = _rep1 = _rep2 = _rep3 = 1;
+		_state = 0;
+		_remainLen = KMatchSpecLenStart + 1;
+	}
+
+	/// <summary>
+	///     以新的 lc/lp/pb 属性重新初始化解码器（LZMA2 0xC0+ chunk）：
+	///     复用字典与概率数组（尺寸不足时才重新分配），重置概率模型与解码状态，保留字典内容。
+	/// </summary>
+	internal void ResetWithProps(byte prop) {
+		var d = prop;
+		if (d >= 9 * 5 * 5) {
+			throw new InnoFormatException("无效的 LZMA 属性");
+		}
+
+		_lc = (byte)(d % 9);
+		d /= 9;
+		_pb = (byte)(d / 5);
+		_lp = (byte)(d % 5);
+		_pbMask = (1u << _pb) - 1;
+		_lpMask = (0x100 << _lp) - (0x100 >> _lc);
+
+		var numProbs = NumBaseProbs + (LzmaLitSize << _lc + _lp);
+		if (_probs.Length < numProbs) {
+			// 池化缓冲尺寸不足：换租（仅在 lc/lp 增大时发生）
+			if (_probsRented) {
+				ArrayPool<ushort>.Shared.Return(_probs);
+			}
+
+			_probs = ArrayPool<ushort>.Shared.Rent(numProbs);
+			_probsRented = true;
+		}
+
+		Array.Fill(_probs, (ushort)(KBitModelTotal >> 1));
+		_rep0 = _rep1 = _rep2 = _rep3 = 1;
+		_state = 0;
+		_remainLen = KMatchSpecLenStart + 1;
+	}
+
+	/// <summary>
+	///     重置字典有效数据（LZMA2 0xE0+ chunk：字典复位）。
+	///     仅重置位置与有效量，字典缓冲内容不清理——距离检查保证复位后匹配
+	///     只能引用复位后写入的字节。
+	/// </summary>
+	internal void ResetDictionary() {
+		_dicPos = 0;
+		_processedPos = 0;
+		_checkDicSize = 0;
+	}
 
 	/// <summary>清空输入缓冲（LZMA2 每个 chunk 是独立码流，必须丢弃上一个 chunk 的残留输入）。</summary>
 	internal void ResetInput() {
@@ -263,11 +349,7 @@ sealed class Lzma1Decoder {
 				_range = 0xFFFFFFFF;
 
 				if (_remainLen > KMatchSpecLenStart + 1) {
-					var numProbs = NumBaseProbs + (LzmaLitSize << _lc + _lp);
-					for (var i = 0; i < numProbs; i++) {
-						_probs[i] = (ushort)(KBitModelTotal >> 1);
-					}
-
+					Array.Fill(_probs, (ushort)(KBitModelTotal >> 1));
 					_rep0 = _rep1 = _rep2 = _rep3 = 1;
 					_state = 0;
 				}
@@ -295,8 +377,9 @@ sealed class Lzma1Decoder {
 
 					_processedPos += (uint)len;
 					_remainLen -= len;
+					ref var dic = ref MemoryMarshal.GetArrayDataReference(_dic);
 					for (var i = 0; i < len; i++) {
-						_dic[_dicPos] = _dic[_dicPos - (int)_rep0 + (_dicPos < _rep0 ? _dicBufSize : 0)];
+						Unsafe.Add(ref dic, _dicPos) = Unsafe.Add(ref dic, _dicPos - (int)_rep0 + (_dicPos < _rep0 ? _dicBufSize : 0));
 						_dicPos++;
 					}
 				}
@@ -665,11 +748,16 @@ sealed class Lzma1Decoder {
 		return true;
 	}
 
-	/// <summary>主解码循环（对应 LzmaDec_DecodeReal）。</summary>
+	/// <summary>
+	///     主解码循环（对应 LzmaDec_DecodeReal）。
+	///     热路径使用 <see cref="Unsafe.Add{T}(ref T, int)" /> 直接寻址数组元素，消除逐位边界检查；
+	///     索引不变式由距离上限检查（≤ 字典容量）与环回运算保证，与原生 liblzma 的裸指针行为一致。
+	/// </summary>
 	private void DecodeReal(int limit, int bufLimit) {
 		int lc = _lc;
 		var lpMask = _lpMask;
 		var pbMask = _pbMask;
+		var dicBufSize = _dicBufSize;
 
 		uint rep0 = _rep0, rep1 = _rep1, rep2 = _rep2, rep3 = _rep3;
 		var state = _state;
@@ -680,17 +768,24 @@ sealed class Lzma1Decoder {
 		var range = _range;
 		var code = _code;
 		var buf = _inPos;
+		var inLen = _inLen;
+
+		ref var probs = ref MemoryMarshal.GetArrayDataReference(_probs);
+		ref var dic = ref MemoryMarshal.GetArrayDataReference(_dic);
+		ref var inBuf = ref MemoryMarshal.GetArrayDataReference(_inBuf);
+
+		// 上一已写入字节：字面/匹配写入后本地跟踪，避免每个字面量重复从字典读取
+		var prevByte = (uint)Unsafe.Add(ref dic, (_dicPos == 0 ? dicBufSize : _dicPos) - 1);
 
 		do {
 			_symbolDicStart = _dicPos;
 			var posState = (processedPos & pbMask) << 4;
 			var probIndex = KStartOffset + IsMatch + (int)(posState + (uint)state);
-			if (DecodeBit(ref _probs[probIndex], ref range, ref code, ref buf, bufLimit) == 0) {
+			if (DecodeBit(ref Unsafe.Add(ref probs, probIndex), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen) == 0) {
 				int symbol;
 				probIndex = KStartOffset + Literal;
 				if (processedPos != 0 || checkDicSize != 0) {
-					probIndex += 3 *
-						(((int)((processedPos << 8) + _dic[(_dicPos == 0 ? _dicBufSize : _dicPos) - 1]) & lpMask) << lc);
+					probIndex += 3 * (((int)((processedPos << 8) + prevByte) & lpMask) << lc);
 				}
 
 				processedPos++;
@@ -699,11 +794,11 @@ sealed class Lzma1Decoder {
 					state -= state < 4 ? state : 3;
 					symbol = 1;
 					for (var i = 0; i < 8; i++) {
-						var tb2 = DecodeBit(ref _probs[probIndex + symbol], ref range, ref code, ref buf, bufLimit);
+						var tb2 = DecodeBit(ref Unsafe.Add(ref probs, probIndex + symbol), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 						symbol = symbol << 1 | tb2;
 					}
 				} else {
-					uint matchByte = _dic[_dicPos - (int)rep0 + (_dicPos < rep0 ? _dicBufSize : 0)];
+					uint matchByte = Unsafe.Add(ref dic, _dicPos - (int)rep0 + (_dicPos < rep0 ? dicBufSize : 0));
 					uint offs = 0x100;
 					state -= state < 10 ? 3 : 6;
 					symbol = 1;
@@ -711,11 +806,13 @@ sealed class Lzma1Decoder {
 						matchByte += matchByte;
 						var bit = offs;
 						offs &= matchByte;
-						var b = DecodeBit(ref _probs[probIndex + (int)(offs + bit + (uint)symbol)],
+						var b = DecodeBit(ref Unsafe.Add(ref probs, probIndex + (int)(offs + bit + (uint)symbol)),
 							ref range,
 							ref code,
 							ref buf,
-							bufLimit);
+							bufLimit,
+							ref inBuf,
+							inLen);
 						symbol = symbol << 1 | b;
 						if (b == 0) {
 							offs ^= bit;
@@ -723,33 +820,35 @@ sealed class Lzma1Decoder {
 					}
 				}
 
-				_dic[_dicPos++] = (byte)symbol;
+				Unsafe.Add(ref dic, _dicPos++) = (byte)symbol;
+				prevByte = (uint)symbol;
 				continue;
 			}
 
 			probIndex = KStartOffset + IsRep + state;
-			if (DecodeBit(ref _probs[probIndex], ref range, ref code, ref buf, bufLimit) == 0) {
+			if (DecodeBit(ref Unsafe.Add(ref probs, probIndex), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen) == 0) {
 				state += KNumStates;
 				probIndex = KStartOffset + LenCoder;
 			} else {
 				probIndex = KStartOffset + IsRepG0 + state;
-				if (DecodeBit(ref _probs[probIndex], ref range, ref code, ref buf, bufLimit) == 0) {
+				if (DecodeBit(ref Unsafe.Add(ref probs, probIndex), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen) == 0) {
 					probIndex = KStartOffset + IsRep0Long + (int)(posState + (uint)state);
-					if (DecodeBit(ref _probs[probIndex], ref range, ref code, ref buf, bufLimit) == 0) {
-						_dic[_dicPos] = _dic[_dicPos - (int)rep0 + (_dicPos < rep0 ? _dicBufSize : 0)];
+					if (DecodeBit(ref Unsafe.Add(ref probs, probIndex), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen) == 0) {
+						Unsafe.Add(ref dic, _dicPos) = Unsafe.Add(ref dic, _dicPos - (int)rep0 + (_dicPos < rep0 ? dicBufSize : 0));
 						_dicPos++;
 						processedPos++;
 						state = state < KNumLitStates ? 9 : 11;
+						prevByte = (uint)Unsafe.Add(ref dic, _dicPos - 1);
 						continue;
 					}
 				} else {
 					uint distance;
 					probIndex = KStartOffset + IsRepG1 + state;
-					if (DecodeBit(ref _probs[probIndex], ref range, ref code, ref buf, bufLimit) == 0) {
+					if (DecodeBit(ref Unsafe.Add(ref probs, probIndex), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen) == 0) {
 						distance = rep1;
 					} else {
 						probIndex = KStartOffset + IsRepG2 + state;
-						if (DecodeBit(ref _probs[probIndex], ref range, ref code, ref buf, bufLimit) == 0) {
+						if (DecodeBit(ref Unsafe.Add(ref probs, probIndex), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen) == 0) {
 							distance = rep2;
 						} else {
 							distance = rep3;
@@ -770,26 +869,26 @@ sealed class Lzma1Decoder {
 			// 长度解码
 			{
 				var probLenBase = probIndex;
-				if (DecodeBit(ref _probs[probLenBase + LenChoice], ref range, ref code, ref buf, bufLimit) == 0) {
+				if (DecodeBit(ref Unsafe.Add(ref probs, probLenBase + LenChoice), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen) == 0) {
 					var probLen = probLenBase + LenLow + (int)posState;
 					len = 1;
 					for (var i = 0; i < KLenNumLowBits; i++) {
-						len = len << 1 | DecodeBit(ref _probs[probLen + len], ref range, ref code, ref buf, bufLimit);
+						len = len << 1 | DecodeBit(ref Unsafe.Add(ref probs, probLen + len), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 					}
 
 					len -= 8;
 				} else {
-					if (DecodeBit(ref _probs[probLenBase + LenChoice2], ref range, ref code, ref buf, bufLimit) == 0) {
+					if (DecodeBit(ref Unsafe.Add(ref probs, probLenBase + LenChoice2), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen) == 0) {
 						var probLen = probLenBase + LenLow + (1 << KLenNumLowBits) + (int)posState;
 						len = 1;
 						for (var i = 0; i < KLenNumLowBits; i++) {
-							len = len << 1 | DecodeBit(ref _probs[probLen + len], ref range, ref code, ref buf, bufLimit);
+							len = len << 1 | DecodeBit(ref Unsafe.Add(ref probs, probLen + len), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 						}
 					} else {
 						var probLen = probLenBase + LenHigh;
 						len = 1;
 						for (var i = 0; i < KLenNumHighBits; i++) {
-							len = len << 1 | DecodeBit(ref _probs[probLen + len], ref range, ref code, ref buf, bufLimit);
+							len = len << 1 | DecodeBit(ref Unsafe.Add(ref probs, probLen + len), ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 						}
 
 						len -= 1 << KLenNumHighBits;
@@ -804,11 +903,13 @@ sealed class Lzma1Decoder {
 					+ (((uint)len < KNumLenToPosStates ? (int)(uint)len : KNumLenToPosStates - 1) << KNumPosSlotBits);
 				distance = 1;
 				for (var i = 0; i < KNumPosSlotBits; i++) {
-					distance = distance << 1 | (uint)DecodeBit(ref _probs[probSlot + (int)distance],
+					distance = distance << 1 | (uint)DecodeBit(ref Unsafe.Add(ref probs, probSlot + (int)distance),
 						ref range,
 						ref code,
 						ref buf,
-						bufLimit);
+						bufLimit,
+						ref inBuf,
+						inLen);
 				}
 
 				distance -= 1 << KNumPosSlotBits;
@@ -823,20 +924,21 @@ sealed class Lzma1Decoder {
 						distance++;
 						while (--numDirectBits >= 0) {
 							var probIdx = prob + (int)distance;
-							uint ttt = _probs[probIdx];
-							Normalize(ref range, ref code, ref buf, bufLimit);
+							ref var probRef = ref Unsafe.Add(ref probs, probIdx);
+							uint ttt = probRef;
+							Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 							var bound = (range >> 11) * ttt;
 							if (code < bound) {
 								range = bound;
-								_probs[probIdx] = (ushort)(ttt + (KBitModelTotal - ttt >> KNumMoveBits));
-								Normalize(ref range, ref code, ref buf, bufLimit);
+								probRef = (ushort)(ttt + (KBitModelTotal - ttt >> KNumMoveBits));
+								Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 								distance += m;
 								m += m;
 							} else {
 								code -= bound;
 								range -= bound;
-								_probs[probIdx] = (ushort)(ttt - (ttt >> KNumMoveBits));
-								Normalize(ref range, ref code, ref buf, bufLimit);
+								probRef = (ushort)(ttt - (ttt >> KNumMoveBits));
+								Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 								m += m;
 								distance += m;
 							}
@@ -846,7 +948,7 @@ sealed class Lzma1Decoder {
 					} else {
 						numDirectBits -= KNumAlignBits;
 						while (--numDirectBits >= 0) {
-							Normalize(ref range, ref code, ref buf, bufLimit);
+							Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 							range >>= 1;
 							code -= range;
 							var t = 0 - (code >> 31);
@@ -858,10 +960,10 @@ sealed class Lzma1Decoder {
 						uint i = 1;
 						// 反转解码 4 位（REV_BIT_CONST x3 + REV_BIT_LAST），
 						// 每次用累积的 i 作为概率索引
-						DecodeRevConst(ref _probs[prob + (int)i], ref range, ref code, ref buf, 1, ref i, bufLimit);
-						DecodeRevConst(ref _probs[prob + (int)i], ref range, ref code, ref buf, 2, ref i, bufLimit);
-						DecodeRevConst(ref _probs[prob + (int)i], ref range, ref code, ref buf, 4, ref i, bufLimit);
-						DecodeRevLast(ref _probs[prob + (int)i], ref range, ref code, ref buf, ref i, bufLimit);
+						DecodeRevConst(ref Unsafe.Add(ref probs, prob + (int)i), ref range, ref code, ref buf, 1, ref i, bufLimit, ref inBuf, inLen);
+						DecodeRevConst(ref Unsafe.Add(ref probs, prob + (int)i), ref range, ref code, ref buf, 2, ref i, bufLimit, ref inBuf, inLen);
+						DecodeRevConst(ref Unsafe.Add(ref probs, prob + (int)i), ref range, ref code, ref buf, 4, ref i, bufLimit, ref inBuf, inLen);
+						DecodeRevLast(ref Unsafe.Add(ref probs, prob + (int)i), ref range, ref code, ref buf, ref i, bufLimit, ref inBuf, inLen);
 						distance <<= KNumAlignBits;
 						distance |= i;
 						if (distance == 0xFFFFFFFF) {
@@ -880,6 +982,11 @@ sealed class Lzma1Decoder {
 				var checkLimit = checkDicSize != 0
 					? checkDicSize
 					: Math.Max(processedPos, ExternalCheckDicSize);
+				// 距离上限取字典容量：保证环回索引始终在字典范围内（防御损坏数据越界）
+				if (checkLimit > (uint)dicBufSize) {
+					checkLimit = (uint)dicBufSize;
+				}
+
 				if (distance >= checkLimit) {
 					len += KMatchSpecLenErrorData + KMatchMinLen;
 					break;
@@ -895,30 +1002,43 @@ sealed class Lzma1Decoder {
 				}
 
 				var curLen = rem < len ? rem : len;
-				var pos = _dicPos - (int)rep0 + (_dicPos < rep0 ? _dicBufSize : 0);
+				var pos = _dicPos - (int)rep0 + (_dicPos < rep0 ? dicBufSize : 0);
 
 				processedPos += (uint)curLen;
 				len -= curLen;
-				if (curLen <= _dicBufSize - pos) {
-					var src = pos - _dicPos;
+				if (curLen <= dicBufSize - pos) {
 					var dest = _dicPos;
 					_dicPos += curLen;
-					for (var i = 0; i < curLen; i++) {
-						_dic[dest + i] = _dic[dest + i + src];
+					if (rep0 >= (uint)curLen) {
+						// 区域不重叠：memmove 语义整段复制
+						Array.Copy(_dic, pos, _dic, dest, curLen);
+					} else {
+						// 重叠：先复制 rep0 字节的种子，再倍增复制覆盖剩余
+						Array.Copy(_dic, pos, _dic, dest, (int)rep0);
+						var copied = (int)rep0;
+						while (copied < curLen) {
+							var n = Math.Min(copied, curLen - copied);
+							Array.Copy(_dic, dest, _dic, dest + copied, n);
+							copied += n;
+						}
 					}
 				} else {
+					// 源区跨越字典环回边界：逐字节复制
 					for (var i = 0; i < curLen; i++) {
-						_dic[_dicPos++] = _dic[pos];
-						if (++pos == _dicBufSize) {
+						Unsafe.Add(ref dic, _dicPos++) = Unsafe.Add(ref dic, pos);
+						if (++pos == dicBufSize) {
 							pos = 0;
 						}
 					}
 				}
+
+				// 记录最后写入字节（字面上下文）
+				prevByte = (uint)Unsafe.Add(ref dic, (_dicPos == 0 ? dicBufSize : _dicPos) - 1);
 			}
 		} while (_dicPos < limit && buf < bufLimit);
 
-		if (buf < _inLen) {
-			Normalize(ref range, ref code, ref buf, bufLimit);
+		if (buf < inLen) {
+			Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 		}
 
 		_inPos = buf;
@@ -938,39 +1058,39 @@ sealed class Lzma1Decoder {
 	}
 
 	/// <summary>REV_BIT_CONST：反转解码一位（m 为 1/2/4）。</summary>
-	private void DecodeRevConst(ref ushort prob, ref uint range, ref uint code, ref int buf, uint m, ref uint i, int bufLimit) {
+	private void DecodeRevConst(ref ushort prob, ref uint range, ref uint code, ref int buf, uint m, ref uint i, int bufLimit, ref byte inBuf, int inLen) {
 		uint ttt = prob;
-		Normalize(ref range, ref code, ref buf, bufLimit);
+		Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 		var bound = (range >> 11) * ttt;
 		if (code < bound) {
 			range = bound;
 			prob = (ushort)(ttt + (KBitModelTotal - ttt >> KNumMoveBits));
-			Normalize(ref range, ref code, ref buf, bufLimit);
+			Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 			i += m;
 		} else {
 			code -= bound;
 			range -= bound;
 			prob = (ushort)(ttt - (ttt >> KNumMoveBits));
-			Normalize(ref range, ref code, ref buf, bufLimit);
+			Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 			i += m * 2;
 		}
 	}
 
 	/// <summary>REV_BIT_LAST：反转解码最后一位（m=8，0 时 i -= 8）。</summary>
-	private void DecodeRevLast(ref ushort prob, ref uint range, ref uint code, ref int buf, ref uint i, int bufLimit) {
+	private void DecodeRevLast(ref ushort prob, ref uint range, ref uint code, ref int buf, ref uint i, int bufLimit, ref byte inBuf, int inLen) {
 		uint ttt = prob;
-		Normalize(ref range, ref code, ref buf, bufLimit);
+		Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 		var bound = (range >> 11) * ttt;
 		if (code < bound) {
 			range = bound;
 			prob = (ushort)(ttt + (KBitModelTotal - ttt >> KNumMoveBits));
-			Normalize(ref range, ref code, ref buf, bufLimit);
+			Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 			i -= 8;
 		} else {
 			code -= bound;
 			range -= bound;
 			prob = (ushort)(ttt - (ttt >> KNumMoveBits));
-			Normalize(ref range, ref code, ref buf, bufLimit);
+			Normalize(ref range, ref code, ref buf, bufLimit, ref inBuf, inLen);
 		}
 	}
 
