@@ -238,6 +238,10 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	}
 
 	/// <summary>异步打开安装包文件。</summary>
+	/// <remarks>
+	///     FileStream 创建（Windows 上可能被 Defender 等文件过滤器拦截阻塞）与元数据解析
+	///     均在后台线程执行，调用线程不会被阻塞。
+	/// </remarks>
 	/// <exception cref="InnoFormatException">文件不是 Inno Setup 安装包或数据损坏。</exception>
 	/// <exception cref="InnoUnsupportedException">安装包版本或特性不受支持。</exception>
 	public static async Task<InnoSetupArchive> OpenAsync(
@@ -246,12 +250,14 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		CancellationToken cancellationToken = default) {
 		// 读取链（切片→解密→解压）全部为同步 Read：异步 FileStream 在 Windows 上会令同步 Read
 		// 走 overlapped+等待（纯开销），此处不使用 FileOptions.Asynchronous
-		FileStream stream = new(path,
-			FileMode.Open,
-			FileAccess.Read,
-			FileShare.Read,
-			4096,
-			FileOptions.SequentialScan);
+		var stream = await Task.Run(
+			() => new FileStream(path,
+				FileMode.Open,
+				FileAccess.Read,
+				FileShare.Read,
+				4096,
+				FileOptions.SequentialScan),
+			cancellationToken).ConfigureAwait(false);
 		try {
 			return await OpenAsync(stream, options, cancellationToken: cancellationToken).ConfigureAwait(false);
 		} catch {
