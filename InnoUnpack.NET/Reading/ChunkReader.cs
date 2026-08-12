@@ -24,8 +24,9 @@ sealed class ChunkReader : IDisposable {
 	/// <param name="slices">切片读取器。</param>
 	/// <param name="data">数据条目（描述 chunk 位置与压缩/加密方式）。</param>
 	/// <param name="crypto">加密上下文（加密安装包且已提供密码时非 null）。</param>
+	/// <param name="maxParallelism">LZMA2 允许的并行解码 worker 数（1 = 串行）。</param>
 	/// <exception cref="InnoUnsupportedException">数据已加密且未提供密码。</exception>
-	public static ChunkReader Open(SliceReader slices, InnoDataEntry data, InnoCrypto? crypto) {
+	public static ChunkReader Open(SliceReader slices, InnoDataEntry data, InnoCrypto? crypto, int maxParallelism = 1) {
 		if (!slices.Seek(data.FirstSlice, data.Offset)) {
 			throw new InnoFormatException($"无法定位 chunk（切片 {data.FirstSlice} 偏移 {data.Offset}）");
 		}
@@ -52,7 +53,7 @@ sealed class ChunkReader : IDisposable {
 			current = crypto.WrapDecryptor(current, data);
 		}
 
-		current = InnoCompressionStreamFactory.Create(current, data.Compression);
+		current = InnoCompressionStreamFactory.Create(current, data.Compression, maxParallelism: maxParallelism);
 		return new(current);
 	}
 

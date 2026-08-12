@@ -170,14 +170,16 @@ public sealed class InnoDataEntry {
 			entry.Compression = InnoCompressionMethod.BZip2;
 		}
 
-		if ((entry.Options & InnoDataOptions.ChunkEncrypted) != 0) {
-			if (v.Ge640) {
-				entry.Encryption = InnoEncryptionMethod.XChaCha20;
-			} else if (v.Ge539) {
-				entry.Encryption = InnoEncryptionMethod.Arc4Sha1;
-			} else {
-				entry.Encryption = InnoEncryptionMethod.Arc4Md5;
-			}
+		if ((entry.Options & InnoDataOptions.ChunkEncrypted) == 0) {
+			return entry;
+		}
+
+		if (v.Ge640) {
+			entry.Encryption = InnoEncryptionMethod.XChaCha20;
+		} else if (v.Ge539) {
+			entry.Encryption = InnoEncryptionMethod.Arc4Sha1;
+		} else {
+			entry.Encryption = InnoEncryptionMethod.Arc4Md5;
 		}
 
 		return entry;
@@ -255,6 +257,7 @@ public readonly record struct InnoChecksum(InnoChecksumType Type, byte[] Data) {
 				var hash = SHA256.HashData(data);
 				return hash.AsSpan().SequenceEqual(Data);
 			}
+			case InnoChecksumType.None:
 			default:
 				return true;
 		}
@@ -288,7 +291,7 @@ abstract class FileHasher : IDisposable {
 	/// <param name="pooledHash">
 	///     可复用的共享 <see cref="IncrementalHash" />（MD5/SHA1/SHA256）；
 	///     传入时校验器不拥有其所有权（<see cref="Dispose" /> 为无操作），
-	///     <see cref="Verify" /> 通过 <see cref="IncrementalHash.GetHashAndReset" /> 复位以供下一个文件复用。
+	///     <see cref="Verify" /> 通过 <see cref="IncrementalHash.GetHashAndReset()" /> 复位以供下一个文件复用。
 	/// </param>
 	public static FileHasher? Create(InnoChecksumType type, IncrementalHash? pooledHash = null) {
 		return type switch {
@@ -311,19 +314,17 @@ abstract class FileHasher : IDisposable {
 		InnoChecksumType expectedType,
 		IncrementalHash hash,
 		bool ownsHash) : FileHasher {
-		private readonly IncrementalHash _hash = hash;
-		private readonly bool _ownsHash = ownsHash;
 
-		public override void Update(ReadOnlySpan<byte> data) { _hash.AppendData(data); }
+		public override void Update(ReadOnlySpan<byte> data) { hash.AppendData(data); }
 
 		public override bool Verify(InnoChecksum expected) {
-			var actual = _hash.GetHashAndReset();
+			var actual = hash.GetHashAndReset();
 			return expected.Type == expectedType && actual.AsSpan().SequenceEqual(expected.Data);
 		}
 
 		public override void Dispose() {
-			if (_ownsHash) {
-				_hash.Dispose();
+			if (ownsHash) {
+				hash.Dispose();
 			}
 		}
 	}

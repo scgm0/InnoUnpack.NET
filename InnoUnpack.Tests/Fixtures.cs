@@ -4,7 +4,8 @@ sealed class SkipException(string message) : Exception(message);
 
 /// <summary>
 ///     测试用共享数据（真实 Inno Setup 安装包样本）。
-///     通过 tools/download-fixtures.sh（Windows: tools/download-fixtures.ps1）下载，不入库。
+///     通过 tools/download-fixtures.sh（Windows: tools/download-fixtures.ps1）下载，不入库；
+///     lzma2-mt-test.bin 为生成的合成样本（多字典复位 LZMA2 流），随仓库提交。
 /// </summary>
 static class Fixtures {
 

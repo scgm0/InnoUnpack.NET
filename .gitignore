@@ -28,5 +28,6 @@ artifacts/
 Thumbs.db
 
 # ===== 测试样本（tools/download-fixtures.sh 下载，不入库） =====
-InnoUnpack.Tests/Fixtures/
+InnoUnpack.Tests/Fixtures/*
 InnoUnpack.Tests/Fixtures/bin/
+!InnoUnpack.Tests/Fixtures/lzma2-mt-test.bin

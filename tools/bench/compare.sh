@@ -2,17 +2,23 @@
 # InnoUnpack.NET 性能对比脚本：innoextract vs JIT vs AOT（Default/Speed/Size）。
 #
 # 用法：bash compare.sh [fixtures-dir]（默认使用仓库内 InnoUnpack.Tests/Fixtures）
-# 前置：innoextract、dotnet SDK 10、clang（AOT 发布需要）。
+# 前置：innoextract（可用 INNOEXTRACT_BIN 指定自定义构建路径）、dotnet SDK 10、clang（AOT 发布需要）。
 set -u
 
 BENCH_SRC="$(cd "$(dirname "$0")" && pwd)"
 FIXTURES="${1:-$BENCH_SRC/../../InnoUnpack.Tests/Fixtures}"
+INNOEXTRACT="${INNOEXTRACT_BIN:-innoextract}"
 RUNS=7
-COMPARABLE=(isetup-4.2.7.exe innosetup-5.5.9-unicode.exe innosetup-5.6.1-unicode.exe)
 ALL=(isetup-4.2.7.exe innosetup-5.5.9-unicode.exe innosetup-5.6.1-unicode.exe innosetup-6.7.3.exe innosetup-7.0.2-x64.exe)
+# 系统 innoextract（1.9）仅支持到 6.0.5；INNOEXTRACT_BIN 指定支持新版本的构建时对比全部样本
+if [ -n "${INNOEXTRACT_BIN:-}" ]; then
+	COMPARABLE=("${ALL[@]}")
+else
+	COMPARABLE=(isetup-4.2.7.exe innosetup-5.5.9-unicode.exe innosetup-5.6.1-unicode.exe)
+fi
 
-if ! command -v innoextract >/dev/null; then
-	echo "缺少 innoextract" >&2
+if ! command -v "$INNOEXTRACT" >/dev/null 2>&1 && ! [ -x "$INNOEXTRACT" ]; then
+	echo "缺少 innoextract（可用 INNOEXTRACT_BIN 指定路径）" >&2
 	exit 1
 fi
 
@@ -62,7 +68,7 @@ inoextract_ms() {
 		rm -rf "$out"
 		local start end
 		start=$(date +%s%N)
-		innoextract -e -s -T none -d "$out" "$FIXTURES/$fixture" >/dev/null 2>&1
+		"$INNOEXTRACT" -e -s -T none -d "$out" "$FIXTURES/$fixture" >/dev/null 2>&1
 		end=$(date +%s%N)
 		rm -rf "$out"
 		t=$(((end - start) / 1000000))

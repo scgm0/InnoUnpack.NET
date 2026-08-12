@@ -72,7 +72,7 @@ sealed class Lzma1Decoder {
 	private readonly byte[] _dic;
 	private readonly int _dicBufSize;
 
-	private readonly byte[] _inBuf;
+	private byte[] _inBuf;
 	private bool _dicRented;
 	private bool _probsRented;
 	private bool _inBufRented;
@@ -297,12 +297,34 @@ sealed class Lzma1Decoder {
 	}
 
 	/// <summary>
+	///     以内存视图接管输入（借用调用方的数组，不复制、不归还）。
+	///     之后调用 <see cref="Decode" /> 时输入直接取自该视图，不再经流读取；
+	///     输入耗尽即视为流结束（截断模式下以 0xFF 填充）。
+	/// </summary>
+	internal void SetInput(byte[] buffer, int start, int end) {
+		if (_inBufRented) {
+			ArrayPool<byte>.Shared.Return(_inBuf);
+			_inBufRented = false;
+		}
+
+		_inBuf = buffer;
+		_inPos = start;
+		_inLen = end;
+		_inputEnded = true;
+	}
+
+	/// <summary>
 	///     将未压缩 chunk 的数据写入字典（LZMA2：这些数据构成 LZMA 窗口的一部分，匹配可以引用），
 	///     并推进逻辑位置（processedPos）。输出由调用方另行提供，此处只更新解码器窗口。
 	/// </summary>
 	internal void WriteUncompressed(ReadOnlySpan<byte> data) {
-		foreach (var b in data) {
-			_dic[_dicPos++] = b;
+		// 按字典环回边界分段整段复制（未压缩 chunk 数据量大，逐字节写入为热路径瓶颈）
+		var offset = 0;
+		while (offset < data.Length) {
+			var n = Math.Min(data.Length - offset, _dicBufSize - _dicPos);
+			data.Slice(offset, n).CopyTo(_dic.AsSpan(_dicPos, n));
+			offset += n;
+			_dicPos += n;
 			if (_dicPos == _dicBufSize) {
 				_dicPos = 0;
 			}
@@ -494,7 +516,8 @@ sealed class Lzma1Decoder {
 		var bufPos = _inPos;
 		var bufLimit = _inLen;
 
-		for (;;) {
+		for (; ; )
+		{
 			var posState = (_processedPos & _pbMask) << 4;
 			var probIndex = KStartOffset + IsMatch + (int)(posState + (uint)state);
 

@@ -572,7 +572,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		ref long extracted,
 		ref int filesExtracted,
 		ConcurrentDictionary<string, byte> dirCache) {
-		var chunk = ChunkReader.Open(slices, chunkFiles[0].DataEntry, _crypto);
+		var chunk = ChunkReader.Open(slices, chunkFiles[0].DataEntry, _crypto, options.MaxParallelism);
 		var chunkStream = chunk.Stream;
 		long chunkPos = 0;
 		// 提取缓冲：整个 chunk 批次复用一份（解压+写盘共用），ArrayPool 租用避免每批次分配
@@ -616,7 +616,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 				if (fileOffset < chunkPos) {
 					// 防御：偏移回退（如同一数据被多个文件条目引用），重新打开 chunk
 					chunk.Dispose();
-					chunk = ChunkReader.Open(slices, file.DataEntry, _crypto);
+					chunk = ChunkReader.Open(slices, file.DataEntry, _crypto, options.MaxParallelism);
 					chunkStream = chunk.Stream;
 					chunkPos = 0;
 				}
@@ -766,7 +766,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 				try {
 					File.SetUnixFileMode(target, (UnixFileMode)directory.Permission);
 				} catch (Exception ex) when (
-					ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) {
+					  ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) {
 					// 权限应用失败：静默忽略
 				}
 			}
@@ -775,7 +775,7 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 				try {
 					File.SetAttributes(target, (FileAttributes)directory.Attributes & ~FileAttributes.Directory);
 				} catch (Exception ex) when (
-					ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) {
+					  ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) {
 					// 属性应用失败：静默忽略
 				}
 			}

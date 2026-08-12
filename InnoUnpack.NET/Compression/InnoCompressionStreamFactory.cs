@@ -23,7 +23,8 @@ static class InnoCompressionStreamFactory {
 	///     LZMA1 输入耗尽时的行为：true 用 0xFF 填充继续（适用于带 EOS 标记的头部块），
 	///     false 严格停止（适用于无结束标记的数据块）。
 	/// </param>
-	public static Stream Create(Stream input, InnoCompressionMethod method, bool allowTruncated = false) {
+	/// <param name="maxParallelism">LZMA2 允许的并行解码 worker 数（1 = 串行）。</param>
+	public static Stream Create(Stream input, InnoCompressionMethod method, bool allowTruncated = false, int maxParallelism = 1) {
 		switch (method) {
 			case InnoCompressionMethod.Stored:
 				return new NonClosingWrapper(input);
@@ -35,15 +36,15 @@ static class InnoCompressionStreamFactory {
 				return new BZip2Stream(input);
 
 			case InnoCompressionMethod.Lzma1: {
-				// 属性头在 Lzma1Stream 内部解析（5 字节）
-				return new Lzma1Stream(input, allowTruncated);
-			}
+					// 属性头在 Lzma1Stream 内部解析（5 字节）
+					return new Lzma1Stream(input, allowTruncated);
+				}
 
 			case InnoCompressionMethod.Lzma2: {
-				// 属性头：1 字节（字典大小编码）
-				var properties = ReadProperties(input, method);
-				return new Lzma2Stream(input, properties[0]);
-			}
+					// 属性头：1 字节（字典大小编码）
+					var properties = ReadProperties(input, method);
+					return new Lzma2Stream(input, properties[0], maxParallelism);
+				}
 
 			default:
 				throw new InnoFormatException($"未知的压缩方法：{method}");

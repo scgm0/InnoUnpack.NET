@@ -5,11 +5,13 @@
 #
 # 用法：powershell -ExecutionPolicy Bypass -File compare.ps1 [-FixturesDir <dir>]
 #       （默认使用仓库内 InnoUnpack.Tests\Fixtures）
-# 前置：innoextract（加入 PATH）、dotnet SDK 10、clang/LLVM（AOT 发布需要，Windows 下为 VS Build Tools 或 LLVM）。
+# 前置：innoextract（加入 PATH；可用环境变量 INNOEXTRACT_BIN 指定自定义构建路径）、
+#       dotnet SDK 10、clang/LLVM（AOT 发布需要，Windows 下为 VS Build Tools 或 LLVM）。
 param([string]$FixturesDir = "")
 
 $ErrorActionPreference = "Stop"
 
+$INNOEXTRACT = if ($env:INNOEXTRACT_BIN) { $env:INNOEXTRACT_BIN } else { "innoextract" }
 $BENCH_SRC = $PSScriptRoot
 if (-not $FixturesDir) {
 	# 默认：tools/bench → tools → 仓库根/InnoUnpack.Tests/Fixtures（两级上溯）
@@ -29,8 +31,8 @@ if ($env:OS -eq "Windows_NT") {
 	$BENCH_EXE = "InnoUnpack.Bench"
 }
 
-if (-not (Get-Command innoextract -ErrorAction SilentlyContinue)) {
-	Write-Host "缺少 innoextract（请安装并加入 PATH）" -ForegroundColor Red
+if (-not $env:INNOEXTRACT_BIN -and -not (Get-Command innoextract -ErrorAction SilentlyContinue)) {
+	Write-Host "缺少 innoextract（请安装并加入 PATH，或用 INNOEXTRACT_BIN 指定路径）" -ForegroundColor Red
 	exit 1
 }
 
@@ -90,7 +92,7 @@ function Invoke-InnoextractMs([string]$Fixture) {
 		$out = Join-Path ([System.IO.Path]::GetTempPath()) "innoextract-bench-$($Fixture -replace '\.exe$','')-$i"
 		if (Test-Path $out) { Remove-Item $out -Recurse -Force }
 		$sw = [System.Diagnostics.Stopwatch]::StartNew()
-		& innoextract -e -s -T none -d $out (Join-Path $FixturesDir $Fixture) 2>$null | Out-Null
+		& $INNOEXTRACT -e -s -T none -d $out (Join-Path $FixturesDir $Fixture) 2>$null | Out-Null
 		$sw.Stop()
 		Remove-Item $out -Recurse -Force
 		if ($sw.ElapsedMilliseconds -lt $best) { $best = $sw.ElapsedMilliseconds }

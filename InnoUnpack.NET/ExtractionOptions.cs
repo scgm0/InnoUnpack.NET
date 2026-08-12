@@ -53,7 +53,11 @@ public sealed class ExtractionOptions {
 
 	/// <summary>
 	///     并行提取的最大 chunk 组并发数（默认 1 = 串行）。
-	///     仅对非固体压缩（每文件独立 chunk）的安装包有收益：固体包全部文件共享一个 chunk，
+	///     两种生效场景：
+	///     - 非固体压缩（每文件独立 chunk）：各 chunk 组并发解码；
+	///     - 含字典复位 chunk（ctrl ≥ 0xE0）的 LZMA2 流：按复位点分段并发解码
+	///       （对应 7-Zip Lzma2DecMt 架构；Inno Setup 生成的流无中间复位点，不触发）。
+	///     固体包（Inno Setup 常见形态）全部文件共享一个 chunk 且无复位点，
 	///     解码状态串行传递，无法并行。
 	///     每个并发 worker 持有独立的切片读取器与解码器，内存约为
 	///     workers ×（LZMA2 字典 8MiB 起 + 缓冲 ~1MiB）；大字典安装包（64MiB 级）需相应调低。

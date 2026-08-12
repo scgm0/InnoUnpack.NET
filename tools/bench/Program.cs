@@ -16,6 +16,7 @@ using InnoUnpack.NET.Metadata;
  *   bench gcwarm <fixtures-dir>               池预热后的分配与 GC 统计
  *   bench crypto <size-mb>                    内存中 XChaCha20 流解密吞吐（SIMD 门禁）
  *   bench parallel <fixtures-dir>             独立 chunk 并行解码门禁（串行 vs 并发批量）
+ *   bench decode <fixtures-dir> <fixture>     纯解码门禁（解码到最后一个文件末尾，不写盘）
  */
 
 var fixtures = new[] {
@@ -38,6 +39,11 @@ if (mode == "crypto") {
 
 if (mode == "parallel") {
 	RunParallelBench(dir);
+	return;
+}
+
+if (mode == "decode") {
+	RunDecodeBench(dir, only!);
 	return;
 }
 
@@ -141,6 +147,51 @@ foreach (var f in fixtures) {
 			break;
 		}
 	}
+}
+
+void RunDecodeBench(string fixturesDir, string fixture) {
+	// 纯解码门禁：解码到文件数据末尾（固体包 = 整条流），输出丢弃不写盘。
+	// 与提取解耦，衡量 LZMA 解码器本身（含 ExeFilter 过滤）。
+	var path = Path.Combine(fixturesDir, fixture);
+	using var archive = InnoSetupArchive.Open(path);
+	// 数据偏移最大的文件：其解码覆盖整条固体流前缀
+	var target = archive.EnumerateFiles()
+		.OrderByDescending(x => x.DataEntry.FileOffset + x.Size)
+		.First();
+
+	// 预热（JIT + 解码器池）
+	Discard(archive, target);
+	var best = double.MaxValue;
+	long bestMs = 0;
+	var bytes = 0L;
+	var sink = new byte[256 * 1024];
+	for (var r = 0; r < 7; r++) {
+		var sw = Stopwatch.StartNew();
+		bytes = Discard(archive, target, sink);
+		sw.Stop();
+		if (sw.Elapsed.TotalSeconds < best) {
+			best = sw.Elapsed.TotalSeconds;
+			bestMs = sw.ElapsedMilliseconds;
+		}
+	}
+
+	Console.WriteLine($"DECODE {fixture}: {bestMs} ms ({bytes / 1048576.0 / best:F1} MiB/s)");
+}
+
+static long Discard(InnoSetupArchive archive, InnoArchiveFile target, byte[]? sink = null) {
+	using var stream = archive.OpenFile(target);
+	sink ??= new byte[256 * 1024];
+	var total = 0L;
+	while (true) {
+		var n = stream.Read(sink);
+		if (n <= 0) {
+			break;
+		}
+
+		total += n;
+	}
+
+	return total;
 }
 
 void RunParallelBench(string fixturesDir) {

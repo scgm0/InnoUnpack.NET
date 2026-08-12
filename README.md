@@ -19,7 +19,8 @@
 - 逐文件提取过滤与输出路径映射（`FileFilter` / `OutputPathMapper`）
 - 提取取消（同步/异步均支持 `CancellationToken`）
 - **并行提取**：多个 archive 实例可并发；单包内 `ExtractionOptions.MaxParallelism` 并行独立 chunk 组
-  （仅对非固体安装包有收益，经文件路径打开时生效；固体包为单 LZMA2 流，chunk 间概率模型延续，无法并行）
+  （仅对非固体安装包有收益，经文件路径打开时生效；固体包为单 LZMA2 流，chunk 间概率模型延续，无法并行，
+  但含字典复位点的 LZMA2 流可按复位点分段并行，见[性能](#性能)节）
 - 文件校验和验证（MD5 / SHA1 / SHA256 / CRC32 / Adler32）
 - 异步 API（`OpenAsync` / `ExtractToDirectoryAsync` / `IAsyncDisposable`）
 - 基于 **文件数**与 **字节数**的进度报告（绝对进度，百分比由调用方计算）
@@ -158,21 +159,40 @@ archive.ExtractToDirectory("output");
 
 ### 与 innoextract 对比（同等条件）
 
-同一文件集（排除 innoextract 默认跳过的卸载程序）、关闭校验和与时间戳、相同输出目录、 **best-of-7**。测试机：i5-9300H，Linux，测试夹具为
-Inno Setup 官方安装器（innoextract 1.9 声明支持至 Inno Setup 6.0.5，故可对比 3 个）：
+同一文件集（排除 innoextract 默认跳过的卸载程序）、关闭校验和与时间戳、相同输出目录、 **best-of-7**（innoextract 为冷进程整进程墙钟）。测试机：i5-9300H / Linux。
+innoextract 1.9 声明支持至 Inno Setup 6.0.5；6.7.3/7.0.2 样本使用
+[dscho 的 inno-6.4-to-6.7-support 分支](https://github.com/dscho/innoextract/tree/inno-6.4-to-6.7-support) 自构建版本对比
+（`bash tools/bench/compare.sh`，`INNOEXTRACT_BIN` 环境变量指定路径）：
 
-| fixture                              | 大小    | innoextract | 本库 JIT（冷进程） | 本库 JIT（热路径） | 本库 AOT-Speed（冷进程） |
-|--------------------------------------|---------|-------------|--------------------|--------------------|--------------------------|
-| isetup-4.2.7.exe（LZMA1）            | 2.9 MiB | 43 ms       | 99 ms              | 82 ms              | **82 ms**                |
-| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB | 86 ms       | 128 ms             | 106 ms             | **109 ms**               |
-| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB | 103 ms      | 124 ms             | 102 ms             | **106 ms**               |
+| fixture                              | 大小     | innoextract | JIT（冷进程） | JIT（热路径） | AOT-Speed（冷进程） |
+|--------------------------------------|----------|-------------|---------------|---------------|---------------------|
+| isetup-4.2.7.exe（LZMA1）            | 2.9 MiB  | 45 ms       | 103 ms        | 81 ms         | 112 ms              |
+| innosetup-5.5.9-unicode.exe（LZMA2） | 5.4 MiB  | 89 ms       | 129 ms        | 106 ms        | 159 ms              |
+| innosetup-5.6.1-unicode.exe（LZMA2） | 5.3 MiB  | 95 ms       | 132 ms        | 102 ms        | 146 ms              |
+| innosetup-6.7.3.exe（LZMA2，8 MiB 字典） | 27.6 MiB | 528 ms   | 555 ms        | 500 ms        | 788 ms              |
+| innosetup-7.0.2-x64.exe（LZMA2，8 MiB 字典） | 49.0 MiB | 955 ms | 978 ms        | 886 ms        | 1246 ms             |
 
-- **热路径（库场景，进程内预热）**：差距约 1.0–1.9x（5.6.1 样本已与 innoextract 持平）。
-  剩余差距来自纯托管 LZMA 位解码器 vs liblzma 的原生标量代码（LZMA range coder 为串行位依赖，
-  每比特一次 32 位乘法，双方均无 SIMD 空间）；实测内联、去异常处理等 JIT 结构调整均无正收益
-- **冷进程（CLI 场景）**：JIT 编译开销约 17–22 ms；AOT 消除后冷启动与 JIT 热路径持平
-- **并行说明**：固体包为单个 LZMA2 流，chunk 间概率模型延续（串行依赖），并行解码不可行
-  （与 liblzma 多线程解码对无 reset 标记流的行为一致）；`MaxParallelism` 仅对非固体包生效
+- **LZMA2（现代安装包）**：热路径与原生 liblzma 持平或略快（6.7.3 约 1.06x、7.0.2 约 1.08x）。
+  纯托管 LZMA 位解码器已对齐 liblzma 结构（串行 range coder 每比特一次 32 位乘法，双方均无 SIMD 空间）；
+  实测字面树展开、强制内联等 JIT 结构调整均无正收益，匹配复制已用 memmove/填充快路径（优于 C 的逐字节循环）
+- **小样本（4.2.7/5.5.9）**：4.2.7 差距来自单文件提取开销（55 个文件的建目录/打开/写盘系统调用），
+  解码器本身符号吞吐与 liblzma 一致（实测 ~17–20M 符号/秒）；5.5.9 差距同时含样本内 40% 未压缩 chunk 的逐字节
+  字典写入（已改为分段 memcpy，见下）
+- **高熵负载（如 Visual Studio 安装器，95% 字面量、427 符号/KB）**：本库 ~17M 符号/秒 vs liblzma ~28M，
+  落后约 1.6–1.7x——字面量 8 位树为纯串行位解码，属托管标量代码生成上限（官方安装器样本 51–65% 字面量
+  下与 liblzma 持平，即上表）
+- **冷进程（CLI 场景）**：JIT 编译开销约 20–90 ms（随夹具增大）；AOT 消除后冷启动与 JIT 热路径持平
+
+### LZMA2 解码器实现说明
+
+- **内存模式**：压缩区域 ≤ 96 MiB 时构造期整体预取到池化缓冲，chunk 头与码流直接寻址，
+  消除逐 chunk 的流读取与输入缓冲搬移（区域按块头给出的长度可能略短，末尾以 0xFF 填充容忍，与流模式一致）
+- **未压缩 chunk 快路径**：字典写入按环回边界分段 `memcpy`（VS 安装器 40% 数据为未压缩 chunk）
+- **并行解码（对应 7-Zip Lzma2DecMt 架构）**：LZMA2 仅在带字典复位（ctrl ≥ 0xE0）的 chunk 处允许独立分段，
+  复位后匹配只能引用本段内已解出的数据，各段可完全并行。流含 ≥ 2 个复位点且输出 ≤ 256 MiB 时按复位点分段并发解码
+  （`ExtractionOptions.MaxParallelism` 控制 worker 数）；合成多复位流实测 4/8 worker 约 1.6x/1.9x。
+  **Inno Setup 生成的流仅流首有一个复位点，不会触发并行路径**——固体包为单一 LZMA2 流，
+  chunk 间概率模型延续（串行依赖），并行解码不可行（与 7-Zip/liblzma 多线程解码对无复位流的行为一致）
 
 ### AOT（NativeAOT）三种 OptimizationPreference
 
@@ -181,12 +201,14 @@ Inno Setup 官方安装器（innoextract 1.9 声明支持至 Inno Setup 6.0.5，
 
 | fixture                     | Default | Speed      | Size   |
 |-----------------------------|---------|------------|--------|
-| isetup-4.2.7.exe            | 112 ms  | **82 ms**  | 111 ms |
-| innosetup-5.5.9-unicode.exe | 148 ms  | **109 ms** | 151 ms |
-| innosetup-5.6.1-unicode.exe | 142 ms  | **106 ms** | 141 ms |
+| isetup-4.2.7.exe            | 111 ms  | **81 ms**  | 111 ms |
+| innosetup-5.5.9-unicode.exe | 153 ms  | **108 ms** | 169 ms |
+| innosetup-5.6.1-unicode.exe | 142 ms  | **104 ms** | 142 ms |
+| innosetup-6.7.3.exe         | 695 ms  | **563 ms** | 720 ms |
+| innosetup-7.0.2-x64.exe     | 1257 ms | **937 ms** | 1318 ms |
 
-`OptimizationPreference=Speed` 耗时为 Default/Size 的 **0.73–0.75 倍**（快约 25–27%）；
-热路径下 AOT-Speed 与 JIT 持平，Default/Size 约慢 30% 左右（JIT 分层编译对热点循环生成更好的代码）。
+`OptimizationPreference=Speed` 耗时为 Default/Size 的 **0.71–0.81 倍**（快约 19–29%）；
+热路径下 AOT-Speed 与 JIT 持平，Default/Size 约慢 30–40%（JIT 分层编译对热点循环生成更好的代码）。
 原生二进制约 3 MB，无运行时依赖。
 
 ### 内存
@@ -206,14 +228,16 @@ Inno Setup 官方安装器（innoextract 1.9 声明支持至 Inno Setup 6.0.5，
 
 ```bash
 # 工具与脚本位于 tools/bench
-bash tools/bench/compare.sh <fixtures-dir>   # 自动发布 AOT×3 并输出全部对比表
+# INNOEXTRACT_BIN 可指定自定义 innoextract 构建路径（如支持 Inno 6.7/7.0 的版本）
+INNOEXTRACT_BIN=/path/to/innoextract bash tools/bench/compare.sh <fixtures-dir>  # 自动发布 AOT×3 并输出全部对比表
 dotnet run --project tools/bench -c Release -- <fixtures-dir> gc      # 冷进程分配/GC
 dotnet run --project tools/bench -c Release -- <fixtures-dir> gcwarm  # 池预热后分配/GC
 dotnet run --project tools/bench -c Release -- crypto <size-mb>       # XChaCha20 解密吞吐（SIMD 门禁）
 dotnet run --project tools/bench -c Release -- parallel <fixtures-dir> # 独立 chunk 并行解码门禁（串行 vs 并发）
+dotnet run --project tools/bench -c Release -- decode <fixtures-dir> <fixture>  # 纯解码门禁（不写盘）
 ```
 
-Windows 对应版本（PowerShell 5.1+/7 均可）：
+Windows 对应版本（PowerShell 5.1+/7 均可，同样支持 `INNOEXTRACT_BIN`）：
 
 ```powershell
 tools\bench\compare.cmd [fixtures-dir]      # 快捷入口（自动选择 pwsh / powershell）
