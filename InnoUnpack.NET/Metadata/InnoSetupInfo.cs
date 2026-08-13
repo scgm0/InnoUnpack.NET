@@ -30,7 +30,7 @@ public sealed class InnoEncryptionHeader {
 }
 
 /// <summary>
-///     安装包的完整元数据信息（主头部、语言、目录、文件与数据条目表）。
+///     安装包的完整元数据信息（主头部、语言、目录、文件、数据条目与脚本条目表）。
 /// </summary>
 public sealed class InnoSetupInfo {
 	/// <summary>setup 数据版本。</summary>
@@ -50,6 +50,42 @@ public sealed class InnoSetupInfo {
 
 	/// <summary>数据条目表（描述文件数据的 chunk 位置）。</summary>
 	public IReadOnlyList<InnoDataEntry> DataEntries { get; internal set; } = [];
+
+	/// <summary>自定义消息表（[CustomMessages] 段）。</summary>
+	public IReadOnlyList<InnoMessageEntry> Messages { get; internal set; } = [];
+
+	/// <summary>权限表（[Permissions] 段）。</summary>
+	public IReadOnlyList<InnoPermissionEntry> Permissions { get; internal set; } = [];
+
+	/// <summary>setup 类型表（[Types] 段）。</summary>
+	public IReadOnlyList<InnoTypeEntry> Types { get; internal set; } = [];
+
+	/// <summary>组件表（[Components] 段）。</summary>
+	public IReadOnlyList<InnoComponentEntry> Components { get; internal set; } = [];
+
+	/// <summary>任务表（[Tasks] 段）。</summary>
+	public IReadOnlyList<InnoTaskEntry> Tasks { get; internal set; } = [];
+
+	/// <summary>图标表（[Icons] 段）。</summary>
+	public IReadOnlyList<InnoIconEntry> Icons { get; internal set; } = [];
+
+	/// <summary>INI 条目表（[INI] 段）。</summary>
+	public IReadOnlyList<InnoIniEntry> IniEntries { get; internal set; } = [];
+
+	/// <summary>注册表条目表（[Registry] 段）。</summary>
+	public IReadOnlyList<InnoRegistryEntry> RegistryEntries { get; internal set; } = [];
+
+	/// <summary>安装删除条目表（[InstallDelete] 段）。</summary>
+	public IReadOnlyList<InnoDeleteEntry> DeleteEntries { get; internal set; } = [];
+
+	/// <summary>卸载删除条目表（[UninstallDelete] 段）。</summary>
+	public IReadOnlyList<InnoDeleteEntry> UninstallDeleteEntries { get; internal set; } = [];
+
+	/// <summary>运行条目表（[Run] 段）。</summary>
+	public IReadOnlyList<InnoRunEntry> RunEntries { get; internal set; } = [];
+
+	/// <summary>卸载运行条目表（[UninstallRun] 段）。</summary>
+	public IReadOnlyList<InnoRunEntry> UninstallRunEntries { get; internal set; } = [];
 
 	/// <summary>6.5.0+ 安装包的加密头（非 6.5.0+ 为 null）。</summary>
 	public InnoEncryptionHeader? EncryptionHeader { get; internal set; }
@@ -173,6 +209,7 @@ public sealed class InnoSetupInfo {
 		InnoBinaryReader blockReader = new(block.Stream);
 
 		var headerRaw = InnoHeader.Parse(blockReader, version);
+		ValidateCounts(headerRaw);
 
 		// 语言表（单遍解析，名称暂不解码）
 		List<InnoLanguageEntry> languages = new(headerRaw.LanguageCount);
@@ -208,12 +245,13 @@ public sealed class InnoSetupInfo {
 
 		info.Languages = languages;
 
-		// 跳过：messages、permissions、types、components、tasks
-		SkipEntries(blockReader, version, headerRaw.MessageCount, SkipMessageEntry);
-		SkipEntries(blockReader, version, headerRaw.PermissionCount, SkipPermissionEntry);
-		SkipEntries(blockReader, version, headerRaw.TypeCount, SkipTypeEntry);
-		SkipEntries(blockReader, version, headerRaw.ComponentCount, SkipComponentEntry);
-		SkipEntries(blockReader, version, headerRaw.TaskCount, SkipTaskEntry);
+		// messages / permissions / types / components / tasks
+		info.Messages = ParseEntries(blockReader, version, headerRaw.MessageCount,
+			(r, v) => InnoMessageEntry.Parse(r, v, codepage, languages));
+		info.Permissions = ParseEntries(blockReader, version, headerRaw.PermissionCount, InnoPermissionEntry.Parse);
+		info.Types = ParseEntries(blockReader, version, headerRaw.TypeCount, (r, v) => InnoTypeEntry.Parse(r, v, codepage));
+		info.Components = ParseEntries(blockReader, version, headerRaw.ComponentCount, (r, v) => InnoComponentEntry.Parse(r, v, codepage));
+		info.Tasks = ParseEntries(blockReader, version, headerRaw.TaskCount, (r, v) => InnoTaskEntry.Parse(r, v, codepage));
 
 		// 目录表
 		var leadBytes = codepage == InnoStringDecoder.CpUtf16Le ? null : headerRaw.LeadBytes;
@@ -239,17 +277,17 @@ public sealed class InnoSetupInfo {
 
 		info.Files = files;
 
-		// 跳过：icons、ini、registry、delete、uninstall delete、run、uninstall run
-		SkipEntries(blockReader, version, headerRaw.IconCount, SkipIconEntry);
-		SkipEntries(blockReader, version, headerRaw.IniEntryCount, SkipIniEntry);
-		SkipEntries(blockReader, version, headerRaw.RegistryEntryCount, SkipRegistryEntry);
-		SkipEntries(blockReader, version, headerRaw.DeleteEntryCount, SkipDeleteEntry);
-		SkipEntries(blockReader, version, headerRaw.UninstallDeleteEntryCount, SkipDeleteEntry);
-		SkipEntries(blockReader, version, headerRaw.RunEntryCount, SkipRunEntry);
-		SkipEntries(blockReader, version, headerRaw.UninstallRunEntryCount, SkipRunEntry);
+		// icons / ini / registry / delete / uninstall delete / run / uninstall run
+		info.Icons = ParseEntries(blockReader, version, headerRaw.IconCount, (r, v) => InnoIconEntry.Parse(r, v, codepage, leadBytes));
+		info.IniEntries = ParseEntries(blockReader, version, headerRaw.IniEntryCount, (r, v) => InnoIniEntry.Parse(r, v, codepage, leadBytes));
+		info.RegistryEntries = ParseEntries(blockReader, version, headerRaw.RegistryEntryCount, (r, v) => InnoRegistryEntry.Parse(r, v, codepage, leadBytes));
+		info.DeleteEntries = ParseEntries(blockReader, version, headerRaw.DeleteEntryCount, (r, v) => InnoDeleteEntry.Parse(r, v, codepage, leadBytes));
+		info.UninstallDeleteEntries = ParseEntries(blockReader, version, headerRaw.UninstallDeleteEntryCount, (r, v) => InnoDeleteEntry.Parse(r, v, codepage, leadBytes));
+		info.RunEntries = ParseEntries(blockReader, version, headerRaw.RunEntryCount, (r, v) => InnoRunEntry.Parse(r, v, codepage, leadBytes));
+		info.UninstallRunEntries = ParseEntries(blockReader, version, headerRaw.UninstallRunEntryCount, (r, v) => InnoRunEntry.Parse(r, v, codepage, leadBytes));
 
 		// 向导图片与辅助 DLL
-		SkipWizardImages(blockReader, version, info.Header, leadBytes);
+		SkipWizardImages(blockReader, version, info.Header);
 
 		// 主块必须正好结束
 		if (block.Stream.ReadByte() != -1) {
@@ -274,17 +312,47 @@ public sealed class InnoSetupInfo {
 		return info;
 	}
 
-	static private void SkipEntries(
-		InnoBinaryReader reader,
-		InnoVersion version,
-		int count,
-		Action<InnoBinaryReader, InnoVersion> skipper) {
-		for (var i = 0; i < count; i++) {
-			skipper(reader, version);
+	/// <summary>防止损坏/恶意头部的条目计数导致过量内存分配。</summary>
+	static private void ValidateCounts(InnoHeader.Raw headerRaw) {
+		ValidateCount(headerRaw.LanguageCount, nameof(headerRaw.LanguageCount));
+		ValidateCount(headerRaw.MessageCount, nameof(headerRaw.MessageCount));
+		ValidateCount(headerRaw.PermissionCount, nameof(headerRaw.PermissionCount));
+		ValidateCount(headerRaw.TypeCount, nameof(headerRaw.TypeCount));
+		ValidateCount(headerRaw.ComponentCount, nameof(headerRaw.ComponentCount));
+		ValidateCount(headerRaw.TaskCount, nameof(headerRaw.TaskCount));
+		ValidateCount(headerRaw.DirectoryCount, nameof(headerRaw.DirectoryCount));
+		ValidateCount(headerRaw.IssigKeyCount, nameof(headerRaw.IssigKeyCount));
+		ValidateCount(headerRaw.FileCount, nameof(headerRaw.FileCount));
+		ValidateCount(headerRaw.IconCount, nameof(headerRaw.IconCount));
+		ValidateCount(headerRaw.IniEntryCount, nameof(headerRaw.IniEntryCount));
+		ValidateCount(headerRaw.RegistryEntryCount, nameof(headerRaw.RegistryEntryCount));
+		ValidateCount(headerRaw.DeleteEntryCount, nameof(headerRaw.DeleteEntryCount));
+		ValidateCount(headerRaw.UninstallDeleteEntryCount, nameof(headerRaw.UninstallDeleteEntryCount));
+		ValidateCount(headerRaw.RunEntryCount, nameof(headerRaw.RunEntryCount));
+		ValidateCount(headerRaw.UninstallRunEntryCount, nameof(headerRaw.UninstallRunEntryCount));
+		ValidateCount(headerRaw.DataEntryCount, nameof(headerRaw.DataEntryCount));
+	}
+
+	static private void ValidateCount(int count, string name) {
+		const int maxEntryCount = 10_000_000; // 远超真实安装包的条目数（通常 < 20 万）
+		if (count < 0 || count > maxEntryCount) {
+			throw new InnoFormatException($"头部字段 {name} 无效：{count}");
 		}
 	}
 
-	static private void SkipWizardImages(InnoBinaryReader reader, InnoVersion version, InnoHeader header, bool[]? leadBytes) {
+	static private List<T> ParseEntries<T>(
+		InnoBinaryReader reader,
+		InnoVersion version,
+		int count,
+		Func<InnoBinaryReader, InnoVersion, T> parser) {
+		List<T> entries = new(count);
+		for (var i = 0; i < count; i++) {
+			entries.Add(parser(reader, version));
+		}
+		return entries;
+	}
+
+	static private void SkipWizardImages(InnoBinaryReader reader, InnoVersion version, InnoHeader header) {
 		InnoHeader.VersionGates v = new(version);
 		SkipWizardImageGroup(reader, version);
 		if (v.Ge200) {
@@ -337,333 +405,4 @@ public sealed class InnoSetupInfo {
 		}
 	}
 
-	static private void SkipMessageEntry(InnoBinaryReader reader, InnoVersion version) {
-		reader.SkipStringBytes(); // name
-		reader.SkipStringBytes(); // value
-		_ = reader.ReadInt32(); // language
-	}
-
-	static private void SkipPermissionEntry(InnoBinaryReader reader, InnoVersion version) {
-		reader.SkipStringBytes();
-		// permissions 数组
-	}
-
-	static private void SkipTypeEntry(InnoBinaryReader reader, InnoVersion version) {
-		reader.SkipStringBytes(); // name
-		reader.SkipStringBytes(); // description
-		if (Ge(version, 4, 0, 1)) {
-			reader.SkipStringBytes(); // languages
-		}
-
-		if (Ge(version, 4, 0, 0)) {
-			reader.SkipStringBytes(); // check
-		}
-
-		ReadWindowsVersionRange(reader);
-		_ = reader.ReadByte(); // options
-		if (Ge(version, 4, 0, 3)) {
-			_ = reader.ReadByte(); // type
-		}
-
-		if (Ge(version, 4, 0, 0)) {
-			_ = reader.ReadUInt64(); // size
-		} else {
-			_ = reader.ReadUInt32();
-		}
-	}
-
-	static private void SkipComponentEntry(InnoBinaryReader reader, InnoVersion version) {
-		reader.SkipStringBytes(); // name
-		reader.SkipStringBytes(); // description
-		reader.SkipStringBytes(); // types
-		if (Ge(version, 4, 0, 1)) {
-			reader.SkipStringBytes(); // languages
-		}
-
-		if (Ge(version, 4, 0, 0)) {
-			reader.SkipStringBytes(); // check
-		}
-
-		if (Ge(version, 4, 0, 0)) {
-			_ = reader.ReadUInt64(); // extra_disk_space
-		} else {
-			_ = reader.ReadUInt32();
-		}
-
-		if (Ge(version, 4, 0, 0)) {
-			if (Ge(version, 6, 7, 0)) {
-				_ = reader.ReadByte(); // level（6.7.0 起为 Byte）
-			} else {
-				_ = reader.ReadInt32();
-			}
-
-			_ = reader.ReadByte(); // used
-		}
-
-		ReadWindowsVersionRange(reader);
-		_ = reader.ReadByte(); // options
-		if (Ge(version, 4, 0, 0)) {
-			_ = reader.ReadUInt64(); // size
-		} else if (Ge(version, 2, 0, 0)) {
-			_ = reader.ReadUInt32();
-		}
-	}
-
-	static private void SkipTaskEntry(InnoBinaryReader reader, InnoVersion version) {
-		reader.SkipStringBytes(); // name
-		reader.SkipStringBytes(); // description
-		reader.SkipStringBytes(); // group_description
-		reader.SkipStringBytes(); // components
-		if (Ge(version, 4, 0, 1)) {
-			reader.SkipStringBytes(); // languages
-		}
-
-		if (Ge(version, 4, 0, 0)) {
-			reader.SkipStringBytes(); // check
-		}
-
-		if (Ge(version, 4, 0, 0)) {
-			if (Ge(version, 6, 7, 0)) {
-				_ = reader.ReadByte(); // level（Byte）
-			} else {
-				_ = reader.ReadInt32();
-			}
-
-			_ = reader.ReadByte(); // used
-		}
-
-		ReadWindowsVersionRange(reader);
-		_ = reader.ReadByte(); // options
-	}
-
-	static private void SkipIconEntry(InnoBinaryReader reader, InnoVersion version) {
-		reader.SkipStringBytes(); // name
-		reader.SkipStringBytes(); // filename
-		reader.SkipStringBytes(); // parameters
-		reader.SkipStringBytes(); // working_dir
-		reader.SkipStringBytes(); // icon_file
-		reader.SkipStringBytes(); // comment
-		SkipConditions(reader, version);
-		if (Ge(version, 5, 3, 5)) {
-			reader.SkipStringBytes(); // app_user_model_id
-		}
-
-		if (Ge(version, 6, 1, 0)) {
-			_ = reader.ReadBytes(16); // app_user_model_toast_activator_clsid
-		}
-
-		ReadWindowsVersionRange(reader);
-		_ = reader.ReadInt32(); // icon_index
-		if (Ge(version, 1, 3, 24)) {
-			_ = reader.ReadInt32(); // show_command
-		}
-
-		if (Ge(version, 1, 3, 15)) {
-			_ = reader.ReadByte(); // close_on_exit
-		}
-
-		if (Ge(version, 2, 0, 7)) {
-			_ = reader.ReadUInt16(); // hotkey
-		}
-
-		SkipFlagReader flags = new(reader);
-		flags.Add(); // NeverUninstall
-		if (!Ge(version, 1, 3, 26)) {
-			flags.Add(); // RunMinimized
-		}
-
-		flags.Add(); // CreateOnlyIfFileExists
-		flags.Add(); // UseAppPaths
-		if (Ge(version, 5, 0, 3) && !Ge(version, 6, 3, 0)) {
-			flags.Add(); // FolderShortcut
-		}
-
-		if (Ge(version, 5, 4, 2)) {
-			flags.Add(); // ExcludeFromShowInNewInstall
-		}
-
-		if (Ge(version, 5, 5, 0)) {
-			flags.Add(); // PreventPinning
-		}
-
-		if (Ge(version, 6, 1, 0)) {
-			flags.Add(); // HasAppUserModelToastActivatorCLSID
-		}
-	}
-
-	static private void SkipIniEntry(InnoBinaryReader reader, InnoVersion version) {
-		reader.SkipStringBytes(); // inifile
-		reader.SkipStringBytes(); // section
-		reader.SkipStringBytes(); // key
-		reader.SkipStringBytes(); // value
-		SkipConditions(reader, version);
-		ReadWindowsVersionRange(reader);
-		_ = reader.ReadByte(); // options
-	}
-
-	static private void SkipRegistryEntry(InnoBinaryReader reader, InnoVersion version) {
-		reader.SkipStringBytes(); // key
-		reader.SkipStringBytes(); // name
-		reader.SkipStringBytes(); // value
-		SkipConditions(reader, version);
-		ReadWindowsVersionRange(reader);
-		_ = reader.ReadUInt32(); // hive
-		if (Ge(version, 4, 1, 0)) {
-			_ = reader.ReadUInt16(); // permission
-		}
-
-		_ = reader.ReadByte(); // type
-		if (Ge(version, 7, 0, 0, 3)) {
-			_ = reader.ReadByte(); // bitness
-		}
-
-		SkipFlagReader flags = new(reader);
-		flags.Add(); // CreateValueIfDoesntExist
-		flags.Add(); // UninsDeleteValue
-		flags.Add(); // UninsClearValue
-		flags.Add(); // UninsDeleteEntireKey
-		flags.Add(); // UninsDeleteEntireKeyIfEmpty
-		if (Ge(version, 1, 2, 6)) {
-			flags.Add(); // PreserveStringType
-		}
-
-		if (Ge(version, 1, 3, 9)) {
-			flags.Add();
-			flags.Add();
-		} // DeleteKey, DeleteValue
-
-		if (Ge(version, 1, 3, 12)) {
-			flags.Add(); // NoError
-		}
-
-		if (Ge(version, 1, 3, 16)) {
-			flags.Add(); // DontCreateKey
-		}
-
-		if (Ge(version, 5, 1, 0) && !Ge(version, 7, 0, 0, 3)) {
-			flags.Add();
-			flags.Add();
-		} // Bits32, Bits64
-	}
-
-	static private void SkipDeleteEntry(InnoBinaryReader reader, InnoVersion version) {
-		reader.SkipStringBytes(); // name
-		SkipConditions(reader, version);
-		ReadWindowsVersionRange(reader);
-		_ = reader.ReadByte(); // type
-	}
-
-	static private void SkipRunEntry(InnoBinaryReader reader, InnoVersion version) {
-		reader.SkipStringBytes(); // name
-		reader.SkipStringBytes(); // parameters
-		reader.SkipStringBytes(); // working_dir
-		if (Ge(version, 1, 3, 9)) {
-			reader.SkipStringBytes(); // run_once_id
-		}
-
-		if (Ge(version, 2, 0, 2)) {
-			reader.SkipStringBytes(); // status_message
-		}
-
-		if (Ge(version, 5, 1, 13)) {
-			reader.SkipStringBytes(); // verb
-		}
-
-		if (Ge(version, 2, 0, 0)) {
-			reader.SkipStringBytes(); // description
-		}
-
-		SkipConditions(reader, version);
-		if (Ge(version, 7, 0, 0, 1)) {
-			reader.SkipStringBytes(); // on_log
-		}
-
-		ReadWindowsVersionRange(reader);
-		if (Ge(version, 1, 3, 24)) {
-			_ = reader.ReadInt32(); // show_command
-		}
-
-		_ = reader.ReadByte(); // wait
-		if (Ge(version, 7, 0, 0, 3)) {
-			_ = reader.ReadByte(); // bitness
-		}
-
-		SkipFlagReader flags = new(reader);
-		if (Ge(version, 1, 2, 3)) {
-			flags.Add(); // ShellExec
-		}
-
-		if (Ge(version, 1, 3, 9)) {
-			flags.Add(); // SkipIfDoesntExist
-		}
-
-		if (Ge(version, 2, 0, 0)) {
-			flags.Add();
-			flags.Add();
-			flags.Add();
-			flags.Add();
-		} // PostInstall, Unchecked, SkipIfSilent, SkipIfNotSilent
-
-		if (Ge(version, 2, 0, 8)) {
-			flags.Add(); // HideWizard
-		}
-
-		if (Ge(version, 5, 1, 10) && !Ge(version, 7, 0, 0, 3)) {
-			flags.Add();
-			flags.Add();
-		} // Bits32, Bits64
-
-		if (Ge(version, 5, 2, 0)) {
-			flags.Add(); // RunAsOriginalUser
-		}
-
-		if (Ge(version, 6, 1, 0)) {
-			flags.Add(); // DontLogParameters
-		}
-
-		if (Ge(version, 6, 3, 0)) {
-			flags.Add(); // LogOutput
-		}
-	}
-
-	/// <summary>跳过条目条件字符串（components/tasks/languages/check/after_install/before_install）。</summary>
-	static private void SkipConditions(InnoBinaryReader reader, InnoVersion version) {
-		if (Ge(version, 2, 0, 0)) {
-			reader.SkipStringBytes(); // components
-			reader.SkipStringBytes(); // tasks
-		}
-
-		if (Ge(version, 4, 0, 1)) {
-			reader.SkipStringBytes(); // languages
-		}
-
-		if (Ge(version, 4, 0, 0)) {
-			reader.SkipStringBytes(); // check
-		}
-
-		if (Ge(version, 4, 1, 0)) {
-			reader.SkipStringBytes(); // after_install
-			reader.SkipStringBytes(); // before_install
-		}
-	}
-
-	/// <summary>读取完整的 windows_version_range（每侧 10 字节）。</summary>
-	static private void ReadWindowsVersionRange(InnoBinaryReader reader) { reader.Skip(20); }
-
-	static private bool Ge(InnoVersion version, uint a, uint b, uint c, uint d = 0) {
-		return version.CompareTo(new(a, b, c, d, version.IsUnicode, version.IsIsx, false, true)) >= 0;
-	}
-
-	/// <summary>按位跳过标志字节。</summary>
-	sealed private class SkipFlagReader(InnoBinaryReader reader) {
-		private int _bits;
-
-		public void Add() {
-			if ((_bits & 7) == 0) {
-				_ = reader.ReadByte();
-			}
-
-			_bits++;
-		}
-	}
 }

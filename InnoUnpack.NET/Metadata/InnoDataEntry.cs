@@ -44,11 +44,8 @@ public sealed class InnoDataEntry {
 	/// <summary>校验和类型与数据（MD5 / SHA1 / SHA256 / CRC32 / Adler32）。</summary>
 	public InnoChecksum Checksum { get; internal set; } = InnoChecksum.None;
 
-	/// <summary>文件时间戳（UTC）。</summary>
+	/// <summary>文件时间戳（<see cref="DateTime.Kind" /> 为 Utc 或 Unspecified，依 TimeStampInUTC 标志而定）。</summary>
 	public DateTime Timestamp { get; internal set; }
-
-	/// <summary>时间戳纳秒部分。</summary>
-	public uint TimestampNsec { get; internal set; }
 
 	/// <summary>文件版本（MS 与 LS 组成的 64 位值）。</summary>
 	public ulong FileVersion { get; internal set; }
@@ -99,8 +96,7 @@ public sealed class InnoDataEntry {
 		const long filetimeOffset = 0x19DB1DED53E8000; // 1601-01-01 与 1970-01-01 的差值（100ns 单位）
 		if (filetime >= filetimeOffset) {
 			filetime -= filetimeOffset;
-			entry.Timestamp = DateTime.UnixEpoch.AddTicks(filetime / 10);
-			entry.TimestampNsec = (uint)(filetime % 10_000_000) * 100;
+			entry.Timestamp = DateTime.UnixEpoch.AddTicks(filetime);
 		}
 
 		var versionMs = reader.ReadUInt32();
@@ -151,6 +147,12 @@ public sealed class InnoDataEntry {
 		}
 
 		entry.Options = (InnoDataOptions)flags.GetResult();
+
+		// 时间戳时区语义：TimeStampInUTC 标志指示 FILETIME 是否为 UTC；
+		// 为 false 时表示构建机的本地墙钟时间（时区未存储），标记为 Unspecified
+		if ((entry.Options & InnoDataOptions.TimeStampInUtc) == 0) {
+			entry.Timestamp = DateTime.SpecifyKind(entry.Timestamp, DateTimeKind.Unspecified);
+		}
 
 		if (v.Ge643) {
 			entry.Sign = InnoSignMode.NoSetting;

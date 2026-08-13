@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: 下载测试样本
+        run: bash tools/download-fixtures.sh
+
+      - name: 构建
+        run: dotnet build InnoUnpack.NET.slnx -c Release
+
+      - name: 测试
+        run: dotnet test InnoUnpack.NET.slnx -c Release --no-build
+
+      - name: 性能回归门禁
+        run: dotnet run --project tools/bench -c Release -- ci InnoUnpack.Tests/Fixtures

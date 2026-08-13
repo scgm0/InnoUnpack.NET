@@ -15,8 +15,10 @@
     - ARC4 + SHA1（5.3.9 – 6.3.x）
     - XChaCha20（6.4.0+，含 6.5.0+ 独立加密头）
 - 可执行文件调用指令优化还原（Call Instruction Optimizer，4.1.8+ 默认启用）
-- 目录权限与属性应用（POSIX 权限 / Windows 文件属性，`ApplyDirectoryAttributes`，默认关闭）
+- 目录与**文件**权限/属性应用（POSIX 权限 / Windows 文件属性，`ApplyDirectoryAttributes` / `ApplyFileAttributes`，默认关闭）
+- **完整脚本元数据解析**（`[Registry]` / `[Run]` / `[Icons]` / `[INI]` / `[Tasks]` / `[Components]` / `[Types]` / `[CustomMessages]` / `[Permissions]` / `[InstallDelete]` 等段，见 `InnoSetupInfo`）
 - 逐文件提取过滤与输出路径映射（`FileFilter` / `OutputPathMapper`）
+- 单文件提取/打开（`ExtractFile` / `OpenFile(path)` / `FindFile`）
 - 提取取消（同步/异步均支持 `CancellationToken`）
 - **并行提取**：多个 archive 实例可并发；单包内 `ExtractionOptions.MaxParallelism` 并行独立 chunk 组
   （仅对非固体安装包有收益，经文件路径打开时生效；固体包为单 LZMA2 流，chunk 间概率模型延续，无法并行，
@@ -32,6 +34,18 @@
 
 ```
 dotnet add package InnoUnpack.NET
+```
+
+也可安装命令行工具（源码位于 `tools/cli`；工具包尚未发布到 NuGet，需先打包）：
+
+```
+# 本地打包并安装（无需发布到 NuGet）
+dotnet pack tools/cli -c Release -o ./artifacts/tools
+dotnet tool install --global --add-source ./artifacts/tools InnoUnpack.NET.Cli
+
+inno-unpack list setup.exe          # 列出文件
+inno-unpack info setup.exe          # 显示元数据
+inno-unpack extract setup.exe out   # 解压到 out/
 ```
 
 ## 快速开始
@@ -138,11 +152,13 @@ archive.ExtractToDirectory("output");
 
 | API                                        | 说明                                           |
 |--------------------------------------------|------------------------------------------------|
-| `IsInnoSetup(Stream)` / `IsInnoSetupAsync` | 无副作用检测（不改变流位置）                   |
-| `OpenFile(InnoArchiveFile)`                | 打开单个文件的数据流                           |
-| `InnoArchiveFile`                          | 源文件名 / 目标路径 / 大小 / 时间戳 / 文件版本 |
+| `IsInnoSetup(Stream)` / `IsInnoSetupAsync` | 无副作用检测（支持非 seekable 流，自动缓冲）  |
+| `OpenFile(...)` / `OpenFileAsync(...)`   | 打开单个文件的数据流（同步 / 异步）          |
+| `FindFile(path)` / `ExtractFile(...)` / `ExtractFileAsync(...)` | 按路径查找 / 提取单个文件（同步 / 异步） |
+| `EnumerateFiles` / `EnumerateFilesAsync`   | 列出全部文件（同步 / 异步）                  |
+| `InnoArchiveFile`                          | 源文件名 / 路径 / 大小 / 时间戳 / 版本 / 属性 / 权限 |
 | `InnoOpenOptions`                          | 强制代码页 / 密码 / 路径变量映射               |
-| `ExtractionOptions`                        | 时间戳保留 / 校验和验证 / 覆盖策略 / 进度报告  |
+| `ExtractionOptions`                        | 时间戳保留 / 校验和验证 / 覆盖策略 / 进度报告 / 文件属性  |
 
 ## 支持范围
 

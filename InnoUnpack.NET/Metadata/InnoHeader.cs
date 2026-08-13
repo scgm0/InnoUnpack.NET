@@ -1237,6 +1237,16 @@ public sealed class InnoHeader {
 		public bool Ge661 => Ge(6, 6, 1);
 		public bool Ge670 => Ge(6, 7, 0);
 		public bool Ge7003 => Ge(7, 0, 0, 3);
+
+		// 脚本条目解析所需的补充版本门控
+		public bool Ge403 => Ge(4, 0, 3);
+		public bool Ge4011 => Ge(4, 0, 11);
+		public bool Ge5110 => Ge(5, 1, 10);
+		public bool Ge535 => Ge(5, 3, 5);
+		public bool Ge542 => Ge(5, 4, 2);
+		public bool Ge610 => Ge(6, 1, 0);
+		public bool Ge7001 => Ge(7, 0, 0, 1);
+
 		public bool Lt133 => !Ge133;
 		public bool Lt136 => !Ge136;
 		public bool Lt300 => !Ge300;

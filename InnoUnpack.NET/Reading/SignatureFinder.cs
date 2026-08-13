@@ -71,7 +71,7 @@ static class SignatureFinder {
 			}
 
 			return TryLoadOffsetsAt(stream, tableOffset, out offsets);
-		} catch (InnoFormatException) {
+		} catch (Exception ex) when (ex is InnoFormatException or IOException or ArgumentException) {
 			return false;
 		}
 	}
@@ -86,13 +86,17 @@ static class SignatureFinder {
 			}
 
 			return TryLoadOffsetsAt(stream, (ulong)resourceOffset, out offsets);
-		} catch (InnoFormatException) {
+		} catch (Exception ex) when (ex is InnoFormatException or IOException or ArgumentException) {
 			return false;
 		}
 	}
 
 	static private bool TryLoadOffsetsAt(Stream stream, ulong pos, out Offsets offsets) {
 		offsets = default;
+		if (pos >= (ulong)stream.Length) {
+			return false;
+		}
+
 		stream.Position = (long)pos;
 
 		Span<byte> magic = stackalloc byte[12];

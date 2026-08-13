@@ -52,6 +52,11 @@ if (mode is "fair" or "fairloop") {
 	return;
 }
 
+if (mode == "ci") {
+	// 性能回归门禁：超过宽松阈值即失败（用于 CI，捕获逐文件解码等数量级回归）
+	Environment.Exit(RunCiGate(dir));
+}
+
 foreach (var f in fixtures) {
 	var path = Path.Combine(dir, f);
 	if (!File.Exists(path)) {
@@ -353,4 +358,64 @@ void RunFixture(string fixture, string mode) {
 	}
 
 	Console.WriteLine($"FAIRLOOP {fixture}: files={filtered.Count} bytes={bytes:N0} best {bestMs} ms ({bytes / 1048576.0 / (bestMs / 1000.0):F1} MiB/s)");
+}
+
+/// <summary>
+///     CI 性能回归门禁：对每个样本做预热后 best-of-3 提取，超过宽松阈值即判失败。
+///     阈值约为热路径实测耗时的 5–30 倍，仅用于捕获数量级回归（如逐文件重复解码）。
+/// </summary>
+int RunCiGate(string fixturesDir) {
+	var thresholds = new Dictionary<string, int> {
+		["isetup-4.2.7.exe"] = 5000,
+		["innosetup-5.5.9-unicode.exe"] = 5000,
+		["innosetup-5.6.1-unicode.exe"] = 5000,
+		["innosetup-6.7.3.exe"] = 15000,
+		["innosetup-7.0.2-x64.exe"] = 30000,
+	};
+
+	var failed = false;
+	foreach (var f in fixtures) {
+		var path = Path.Combine(fixturesDir, f);
+		if (!File.Exists(path)) {
+			Console.WriteLine($"[skip] {f}（缺少样本）");
+			continue;
+		}
+
+		using var archive = InnoSetupArchive.Open(path);
+		var opts = new ExtractionOptions { VerifyChecksums = false, PreserveTimestamps = false };
+
+		// 预热（JIT + 解码器池）
+		var warm = Path.Combine(Path.GetTempPath(), "innobench-ci-warm");
+		if (Directory.Exists(warm)) {
+			Directory.Delete(warm, true);
+		}
+
+		archive.ExtractToDirectory(warm, opts);
+		Directory.Delete(warm, true);
+
+		long best = long.MaxValue;
+		for (var r = 0; r < 3; r++) {
+			var outDir = Path.Combine(Path.GetTempPath(), "innobench-ci-" + f[..^4]);
+			if (Directory.Exists(outDir)) {
+				Directory.Delete(outDir, true);
+			}
+
+			var sw = Stopwatch.StartNew();
+			archive.ExtractToDirectory(outDir, opts);
+			sw.Stop();
+			Directory.Delete(outDir, true);
+			if (sw.ElapsedMilliseconds < best) {
+				best = sw.ElapsedMilliseconds;
+			}
+		}
+
+		var limit = thresholds[f];
+		var ok = best <= limit;
+		Console.WriteLine($"CI {f}: {best} ms (limit {limit} ms) {(ok ? "OK" : "REGRESSION")}");
+		if (!ok) {
+			failed = true;
+		}
+	}
+
+	return failed ? 1 : 0;
 }

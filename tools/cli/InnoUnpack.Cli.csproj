@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>latest</LangVersion>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <AssemblyName>inno-unpack</AssemblyName>
+        <RootNamespace>InnoUnpack.Cli</RootNamespace>
+        <PackAsTool>true</PackAsTool>
+        <ToolCommandName>inno-unpack</ToolCommandName>
+        <PackageId>InnoUnpack.NET.Cli</PackageId>
+        <Version>1.0.0</Version>
+        <Description>Inno Setup 安装包解压命令行工具（基于 InnoUnpack.NET）</Description>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <RepositoryType>git</RepositoryType>
+        <RepositoryUrl>https://github.com/scgm0/InnoUnpack.NET</RepositoryUrl>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\..\InnoUnpack.NET\InnoUnpack.NET.csproj"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="README.md" Pack="true" PackagePath="\"/>
+    </ItemGroup>
+
+</Project>

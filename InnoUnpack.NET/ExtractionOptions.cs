@@ -21,6 +21,13 @@ public sealed class ExtractionOptions {
 	/// </summary>
 	public bool ApplyDirectoryAttributes { get; set; }
 
+	/// <summary>
+	///     是否应用文件条目的权限与属性（默认 false）：POSIX 权限在非 Windows 平台应用，
+	///     Windows 文件属性在 Windows 平台应用；在提取完成后应用（避免只读文件阻碍覆盖写入）。
+	///     与 <see cref="ApplyDirectoryAttributes" /> 语义一致，仅作用于文件。
+	/// </summary>
+	public bool ApplyFileAttributes { get; set; }
+
 	/// <summary>是否提取临时文件（DeleteAfterInstall，默认 true）。</summary>
 	public bool ExtractTemporaryFiles { get; set; } = true;
 

@@ -84,12 +84,24 @@ sealed class InnoBinaryReader(Stream stream) {
 	/// </summary>
 	public byte[] ReadStringBytes() {
 		var length = ReadUInt32();
+		// 防御损坏/恶意长度：真实字符串远小于此上限（编译代码/许可文本 < 64 MiB）
+		const int maxStringBytes = 256 * 1024 * 1024;
+		if (length > maxStringBytes) {
+			throw new InnoFormatException($"字符串长度异常：{length}");
+		}
+
 		return ReadBytes((int)length);
 	}
 
 	/// <summary>跳过长度前缀字符串（不分配内容缓冲区）。</summary>
 	public void SkipStringBytes() {
 		var length = ReadUInt32();
+		// 跳过不分配大缓冲区，但同样拒绝异常长度以尽早终止
+		const int maxStringBytes = 256 * 1024 * 1024;
+		if (length > maxStringBytes) {
+			throw new InnoFormatException($"字符串长度异常：{length}");
+		}
+
 		Skip(length);
 	}
 

@@ -43,11 +43,17 @@ public sealed class InnoArchiveFile {
 	/// <summary>解压后大小（字节）。</summary>
 	public ulong Size { get; internal init; }
 
-	/// <summary>文件时间戳（UTC）。</summary>
+	/// <summary>文件时间戳（<see cref="DateTime.Kind" /> 为 Utc 或 Unspecified，依 TimeStampInUTC 标志而定）。</summary>
 	public DateTime Timestamp { get; internal init; }
 
 	/// <summary>文件版本（64 位）。</summary>
 	public ulong FileVersion { get; internal init; }
+
+	/// <summary>文件属性（Windows 文件属性标志）。</summary>
+	public uint Attributes { get; internal init; }
+
+	/// <summary>权限（POSIX 风格，-1 表示未指定）。</summary>
+	public short Permission { get; internal init; } = -1;
 
 	/// <summary>选项标志。</summary>
 	public InnoFileOptions Options { get; internal init; }
@@ -60,4 +66,7 @@ public sealed class InnoArchiveFile {
 
 	/// <summary>内部：对应的数据条目。</summary>
 	internal InnoDataEntry DataEntry { get; init; } = new();
+
+	/// <summary>内部：所属的 archive 实例（用于 <see cref="InnoSetupArchive.OpenFile(InnoArchiveFile)" /> 校验来源）。</summary>
+	internal InnoSetupArchive? Owner { get; init; }
 }

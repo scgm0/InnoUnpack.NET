@@ -96,16 +96,14 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 			return FileHasher.Create(type);
 		}
 
-		switch (type) {
-			case InnoChecksumType.Md5:
-				return FileHasher.Create(type, _hashPoolMd5 ??= IncrementalHash.CreateHash(HashAlgorithmName.MD5));
-			case InnoChecksumType.Sha1:
-				return FileHasher.Create(type, _hashPoolSha1 ??= IncrementalHash.CreateHash(HashAlgorithmName.SHA1));
-			case InnoChecksumType.Sha256:
-				return FileHasher.Create(type, _hashPoolSha256 ??= IncrementalHash.CreateHash(HashAlgorithmName.SHA256));
-			default:
-				return FileHasher.Create(type);
-		}
+		return type switch {
+			InnoChecksumType.Md5 => FileHasher.Create(type, _hashPoolMd5 ??= IncrementalHash.CreateHash(HashAlgorithmName.MD5)),
+			InnoChecksumType.Sha1 =>
+				FileHasher.Create(type, _hashPoolSha1 ??= IncrementalHash.CreateHash(HashAlgorithmName.SHA1)),
+			InnoChecksumType.Sha256 => FileHasher.Create(type,
+				_hashPoolSha256 ??= IncrementalHash.CreateHash(HashAlgorithmName.SHA256)),
+			_ => FileHasher.Create(type)
+		};
 	}
 
 	private (int Count, ulong Size) GetFileStats() {
@@ -128,10 +126,19 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	///     检测流是否为受支持的 Inno Setup 安装包（无副作用，不改变流位置）。
 	/// </summary>
 	public static bool IsInnoSetup(Stream stream) {
-		if (!stream.CanSeek) {
-			return false;
+		ArgumentNullException.ThrowIfNull(stream);
+		if (stream.CanSeek) {
+			return IsInnoSetupCore(stream);
 		}
 
+		// 非 seekable 流：检测需随机访问 PE 头与签名，缓冲到内存后检测
+		using var buffered = new MemoryStream();
+		stream.CopyTo(buffered);
+		buffered.Position = 0;
+		return IsInnoSetupCore(buffered);
+	}
+
+	static private bool IsInnoSetupCore(Stream stream) {
 		var position = stream.Position;
 		try {
 			var offsets = SignatureFinder.Find(stream);
@@ -193,18 +200,17 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 			throw new ArgumentException("安装包流必须支持查找（Seek）", nameof(stream));
 		}
 
-		var offsets = SignatureFinder.Find(stream);
-		stream.Position = (long)offsets.HeaderOffset;
+		var (headerOffset, dataOffset) = SignatureFinder.Find(stream);
+		stream.Position = (long)headerOffset;
 		var info = InnoSetupInfo.Load(stream, options.ForceCodepage);
 
 		SliceReader slices;
 		Func<SliceReader>? sliceReaderFactory = null;
-		if (offsets.DataOffset != 0) {
+		if (dataOffset != 0) {
 			// 单文件安装包：数据内嵌于 exe 中
-			slices = SliceReader.CreateEmbedded(stream, offsets.DataOffset);
+			slices = SliceReader.CreateEmbedded(stream, dataOffset);
 			if (installerPath is not null) {
 				// 并行 worker：独立打开文件句柄（独立 Position，可并发读）
-				var dataOffset = offsets.DataOffset;
 				sliceReaderFactory = () => SliceReader.CreateEmbeddedOwned(
 					new FileStream(installerPath, FileMode.Open, FileAccess.Read, FileShare.Read),
 					dataOffset);
@@ -234,7 +240,11 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 
 		// 校验密码（错误会抛出 InnoFormatException），并建立解密上下文
 		var crypto = InnoCrypto.Create(info, options.Password);
-		return new(stream, leaveOpen, slices, info, converter, crypto, sliceReaderFactory);
+		InnoSetupArchive archive = new(stream, leaveOpen, slices, info, converter, crypto, sliceReaderFactory);
+
+		// 解析期预计算文件统计（FileCount/TotalFileSize 不再触发枚举）
+		archive.GetFileStats();
+		return archive;
 	}
 
 	/// <summary>异步打开安装包文件。</summary>
@@ -324,12 +334,28 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 				Size = data.FileSize,
 				Timestamp = data.Timestamp,
 				FileVersion = data.FileVersion,
+				Attributes = entry.Attributes,
+				Permission = entry.Permission,
 				Options = entry.Options,
 				Type = entry.Type,
 				Entry = entry,
-				DataEntry = data
+				DataEntry = data,
+				Owner = this
 			};
 		}
+	}
+
+	/// <summary>异步列出安装包中的所有文件（等价于 <c>Task.Run(EnumerateFiles)</c>）。</summary>
+	public Task<IReadOnlyList<InnoArchiveFile>> EnumerateFilesAsync(CancellationToken cancellationToken = default) {
+		return Task.Run(IReadOnlyList<InnoArchiveFile> () => [.. EnumerateFiles()], cancellationToken);
+	}
+
+	/// <summary>异步按过滤条件列出安装包中的文件。</summary>
+	public Task<IReadOnlyList<InnoArchiveFile>> EnumerateFilesAsync(
+		Func<InnoArchiveFile, bool> filter,
+		CancellationToken cancellationToken = default) {
+		ArgumentNullException.ThrowIfNull(filter);
+		return Task.Run(IReadOnlyList<InnoArchiveFile> () => [.. EnumerateFiles(filter)], cancellationToken);
 	}
 
 	/// <summary>
@@ -338,6 +364,10 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 	/// <exception cref="InnoUnsupportedException">文件数据已加密且未提供密码。</exception>
 	public Stream OpenFile(InnoArchiveFile file) {
 		ArgumentNullException.ThrowIfNull(file);
+		if (!ReferenceEquals(file.Owner, this)) {
+			throw new ArgumentException("文件条目不属于当前安装包", nameof(file));
+		}
+
 		var chunk = ChunkReader.Open(_slices, file.DataEntry, _crypto);
 		try {
 			if (file.DataEntry.FileOffset > 0) {
@@ -355,6 +385,72 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 			chunk.Dispose();
 			throw;
 		}
+	}
+
+	/// <summary>
+	///     异步打开文件的解压数据流（调用方负责释放）。
+	///     解压流创建（chunk 定位/解密/解压初始化）为阻塞式 IO，在后台线程执行以避免阻塞调用方。
+	/// </summary>
+	/// <exception cref="InnoUnsupportedException">文件数据已加密且未提供密码。</exception>
+	public Task<Stream> OpenFileAsync(InnoArchiveFile file, CancellationToken cancellationToken = default) {
+		ArgumentNullException.ThrowIfNull(file);
+		return Task.Run(() => OpenFile(file), cancellationToken);
+	}
+
+	/// <summary>按输出路径查找文件条目（不存在返回 null）。</summary>
+	public InnoArchiveFile? FindFile(string path) {
+		ArgumentNullException.ThrowIfNull(path);
+		foreach (var file in EnumerateFiles()) {
+			if (string.Equals(file.Path, path, StringComparison.Ordinal)) {
+				return file;
+			}
+		}
+
+		return null;
+	}
+
+	/// <summary>按输出路径打开文件的解压数据流（调用方负责释放）。</summary>
+	/// <exception cref="KeyNotFoundException">未找到指定路径的文件。</exception>
+	public Stream OpenFile(string path) {
+		var file = FindFile(path) ?? throw new KeyNotFoundException($"未找到文件：{path}");
+		return OpenFile(file);
+	}
+
+	/// <summary>异步按输出路径打开文件的解压数据流（调用方负责释放）。</summary>
+	/// <exception cref="KeyNotFoundException">未找到指定路径的文件。</exception>
+	public Task<Stream> OpenFileAsync(string path, CancellationToken cancellationToken = default) {
+		ArgumentNullException.ThrowIfNull(path);
+		return Task.Run(() => OpenFile(path), cancellationToken);
+	}
+
+	/// <summary>提取单个文件到目录（保留相对路径，自动创建父目录）。</summary>
+	/// <exception cref="KeyNotFoundException">未找到指定路径的文件。</exception>
+	public void ExtractFile(
+		string path,
+		string outputDirectory,
+		ExtractionOptions? options = null,
+		CancellationToken cancellationToken = default) {
+		var file = FindFile(path) ?? throw new KeyNotFoundException($"未找到文件：{path}");
+		ArgumentNullException.ThrowIfNull(outputDirectory);
+		options ??= new();
+		var outputRoot = Path.GetFullPath(outputDirectory);
+		Directory.CreateDirectory(outputRoot);
+		var (extracted, filesExtracted) = ExtractByChunk([file], outputRoot, options, cancellationToken);
+		options.RaiseProgressChanged(extracted, filesExtracted, null);
+	}
+
+	/// <summary>
+	///     异步提取单个文件到目录（保留相对路径，自动创建父目录）。
+	///     解压为 CPU 密集工作，在后台线程执行（等价于 <c>Task.Run(ExtractFile)</c>）。
+	/// </summary>
+	/// <exception cref="KeyNotFoundException">未找到指定路径的文件。</exception>
+	public Task ExtractFileAsync(
+		string path,
+		string outputDirectory,
+		ExtractionOptions? options = null,
+		CancellationToken cancellationToken = default) {
+		ArgumentNullException.ThrowIfNull(outputDirectory);
+		return Task.Run(() => ExtractFile(path, outputDirectory, options, cancellationToken), cancellationToken);
 	}
 
 	/// <summary>
@@ -668,6 +764,9 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 				chunkPos += (long)file.Size;
 				AddProgress(options, parallel, ref extracted, ref filesExtracted, 0, 1, file.Path);
 				SetTimestamp(target, file.Timestamp, options);
+				if (options.ApplyFileAttributes) {
+					ApplyFileAttributes(target, file);
+				}
 			}
 		} finally {
 			ArrayPool<byte>.Shared.Return(buffer);
@@ -720,7 +819,12 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 		}
 
 		try {
-			File.SetLastWriteTimeUtc(target, timestamp);
+			if (timestamp.Kind == DateTimeKind.Utc) {
+				File.SetLastWriteTimeUtc(target, timestamp);
+			} else {
+				// 本地墙钟时间（TimeStampInUTC 未设置）：按本地时间写入，不做时区换算
+				File.SetLastWriteTime(target, timestamp);
+			}
 		} catch (IOException) {
 			// 忽略时间戳设置失败（如权限或文件系统限制）
 		} catch (UnauthorizedAccessException) { }
@@ -784,6 +888,31 @@ public sealed class InnoSetupArchive : IDisposable, IAsyncDisposable {
 					  ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) {
 					// 属性应用失败：静默忽略
 				}
+			}
+		}
+	}
+
+	/// <summary>
+	///     应用单个文件条目的权限与属性（提取过程中逐文件调用，使用实际输出路径）：
+	///     POSIX 权限在非 Windows 平台应用，Windows 文件属性在 Windows 平台应用。
+	///     应用失败静默忽略，不影响提取结果。
+	/// </summary>
+	internal static void ApplyFileAttributes(string target, InnoArchiveFile file) {
+		if (file.Permission >= 0 && !OperatingSystem.IsWindows()) {
+			try {
+				File.SetUnixFileMode(target, (UnixFileMode)file.Permission);
+			} catch (Exception ex) when (
+				  ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) {
+				// 权限应用失败：静默忽略
+			}
+		}
+
+		if (file.Attributes != 0 && OperatingSystem.IsWindows()) {
+			try {
+				File.SetAttributes(target, (FileAttributes)file.Attributes);
+			} catch (Exception ex) when (
+				  ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException) {
+				// 属性应用失败：静默忽略
 			}
 		}
 	}
